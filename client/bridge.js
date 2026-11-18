@@ -2,23 +2,23 @@
 // Copyright (C) 2026 Averis authors — 开源范围与商业授权见 NOTICE / LICENSING.md
 
 /* ============================================================
-   Averis ↔ Parse 求解桥接层
+   Averis ↔ 内置求解内核桥接层
    职责单一：让 Averis 的 UI 能提交建模任务、查询进度、拿到产出文件。
-   真实后端 = Parse 的能力（app.asar 内的 runner + 内置 Python 引擎）。
+   真实后端 = 内置内核的求解能力（runner + 内置 Python 引擎）。
    双模式：检测到 window.electronAPI 走真实求解；浏览器直开走 mock 演示。
    无需改动即可在 Averis 壳（真实）或浏览器（演示）两种环境下运行。
    ============================================================ */
 (function (global) {
   'use strict';
 
-  // Parse 的能力清单：Averis 只用到求解、产出、环境三项，其余（账号/协作/扩展/激活）一律不接
+  // 内核能力清单：Averis 只用到求解、产出、环境三项，其余（账号/协作/扩展/激活）一律不接
   var CAPABILITIES = {
     solve: 'task/runner 单代理求解链',
     artifacts: '求解/问题X 的论文、代码、图表、结果文件',
-    envCheck: 'parse_env 内 Python/TinyTeX/Pandoc 自检'
+    envCheck: '内置 Python/TinyTeX/Pandoc 自检'
   };
 
-  // 阶段定义：与 Parse 求解链对应，但对用户只呈现 5 个可读阶段
+  // 阶段定义：与内核求解链对应，但对用户只呈现 5 个可读阶段
   var STAGES = [
     { id: 'read',  label: '读题',   desc: '解析赛题与数据' },
     { id: 'model', label: '建模',   desc: '识别问题并规划模型' },
@@ -29,7 +29,7 @@
 
   var state = { tasks: {}, seq: 0, liveArmed: false, liveGen: 0 };
 
-  // 产出文件样例：结构与 Parse 的建模产物清单一一对应
+  // 产出文件样例：结构与内核建模产物清单一一对应
   function sampleArtifacts(seed) {
     return [
       { group: '论文', name: 'Averis_建模论文.pdf', type: 'pdf', size: '1.8 MB' },
@@ -65,7 +65,7 @@
     return 4;
   }
 
-  // 是否运行在 Parse 的 Electron 壳里（有 electronAPI = 能用真实求解链）
+  // 是否运行在 Averis Electron 壳里（有 electronAPI = 能用真实求解链）
   function isLive() {
     return !!(global.electronAPI && typeof global.electronAPI.launchTask === 'function');
   }
@@ -90,7 +90,7 @@
     return id;
   }
 
-  // ---- 真实模式（复用 Parse 求解链）----
+  // ---- 真实模式（复用内置求解链）----
   // 链路：prepareWorkspace → launchTask(projectPath, apiConfig, prompt, modifyMode)
   //       阶段由 onAgentEvent 的 agent-block / text / state 事件驱动
   var liveListenerBound = false;
@@ -123,7 +123,7 @@
         var top = seg.length > 1 ? seg[0] : '项目根';
         var name = f.name || seg[seg.length - 1];
         if (/^(题目|数据|\.claude|\.git|node_modules)$/.test(top)) return;
-        if (/^(规范|规则|CLAUDE|\.parse-ws|\.)/.test(name)) return;
+        if (/^(规范|规则|CLAUDE|\.)/.test(name)) return;
         var e = (name.split('.').pop() || '').toLowerCase();
         var type = e === 'pdf' ? 'pdf' : (e === 'docx' || e === 'doc') ? 'word'
           : (e === 'py' || e === 'tex' || e === 'json' || e === 'cls') ? 'code'
@@ -155,7 +155,7 @@
       if (t === 'agent-block' && p.block_type === 'text' && p.op === 'delta' && p.content) {
         cb({ type: 'text', text: p.content }); return;
       }
-      // 工具调用 → 依据文件路径映射到 5 个阶段（复用 parse 的阶段识别思路）
+      // 工具调用 → 依据文件路径映射到 5 个阶段（复用内核阶段识别）
       if (t === 'agent-block' && p.block_type === 'tool_use' && p.op === 'end') {
         var stage = inferStage(p.meta && p.meta.input);
         if (stage >= 0) cb({ type: 'stage', index: stage, stage: STAGES[stage].id, label: STAGES[stage].label });
@@ -266,7 +266,7 @@
     return isLive() ? [] : sampleArtifacts(id);
   }
 
-  // 环境自检：真实壳里走 parse 的 checkEnvironment，否则静态契约
+  // 环境自检：真实壳里走内核的 checkEnvironment，否则静态契约
   function environment() {
     if (isLive() && typeof global.electronAPI.checkEnvironment === 'function') {
       try {
@@ -275,9 +275,9 @@
       } catch (e) {}
     }
     return {
-      python: 'parse_env/python-env/win-x64（内置）',
-      latex: 'parse_env/TinyTeX（内置 XeLaTeX）',
-      pandoc: 'parse_env/pandoc（内置）',
+      python: '内置 Python 运行时',
+      latex: '内置 TinyTeX（XeLaTeX）',
+      pandoc: '内置 Pandoc',
       online: false
     };
   }
