@@ -446,19 +446,6 @@
 
   $('#btnSend').addEventListener('click', function () { send($('#chatInput').value); });
 
-  // ---------- 例题演示：不接模型，在 exe / 浏览器里都能跑通完整流程 ----------
-  var EXAMPLE = '例题：城市出租车调度优化\n' +
-    '附件为某城市 120 辆出租车一天的 GPS 轨迹与订单数据（采样间隔 30 秒），字段：车辆ID、时间戳、经度、纬度、载客状态（0/1）。\n' +
-    '问题一：清洗轨迹数据（剔除漂移点与重复记录），统计每辆车的日运营里程、载客里程与空驶率，给出全市出租车空驶率的分布；\n' +
-    '问题二：基于订单起终点分布，建立以乘客总等待时间最小为目标的调度优化模型，给出早高峰（7:00–9:00）的调度方案；\n' +
-    '问题三：评估调度方案对空驶率与等待时间的改善效果，并对出租车数量做敏感性分析。\n' +
-    '请完成上述三问的建模、求解与论文写作。';
-  $('#btnExample').addEventListener('click', function () {
-    if (busy()) { toast('当前有任务在运行，请先等待完成或停止', { icon: 'info' }); return; }
-    demoTask = true;
-    toast('例题演示：跑通完整求解流程，不接模型、不产生真实文件', { icon: 'flask' });
-    startSend(EXAMPLE);
-  });
   $('#btnStop').addEventListener('click', function () {
     if (stopping) return;
     var id = currentTaskId;
