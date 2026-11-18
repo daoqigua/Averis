@@ -1,0 +1,18 @@
+Averis — AI Modeling & Research Studio
+Copyright (C) 2026 Averis authors
+
+This repository is dual-licensed:
+
+1. Open-source client: the client UI and framework files listed in LICENSING.md
+   are licensed under the GNU Affero General Public License, version 3 only
+   (AGPL-3.0-only). See LICENSE for the full text.
+
+2. Commercial license: for use in closed-source products, commercial
+   redistribution, or network services that cannot comply with AGPL-3.0,
+   a separate commercial license is required. Contact the author through the
+   repository issue tracker.
+
+The Averis kernel, the paper-generation rules/templates, model prompts and
+other files listed as excluded in LICENSING.md are NOT covered by the AGPL
+license and are not part of the open-source release. They are distributed
+only as part of the official packaged binary, subject to their own terms.
