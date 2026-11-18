@@ -5,7 +5,7 @@
 
 > 本仓库只包含**客户端 UI 与框架代码**。求解内核、论文规则库与提示词资产不包含在内，因此本仓库不能单独构建出完整求解客户端；Windows 安装包通过 Releases / 交流群发布。
 
-![Averis 工作台](assets/workbench.png)
+![题目与附件资料分开上传](assets/workbench.png)
 
 ![Averis LaTeX 编辑器](assets/editor.png)
 
