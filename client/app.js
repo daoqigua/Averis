@@ -526,27 +526,60 @@
     $('#edGutter').textContent = s;
     $('#edGutter').scrollTop = $('#editorText').scrollTop;
   }
+  var edOlSeq = 0;
+  function edJumpLine(line) {
+    var ta = $('#editorText'); var ls = ta.value.split('\n'); var idx = 0;
+    for (var i = 0; i < line; i++) idx += ls[i].length + 1;
+    ta.focus(); ta.setSelectionRange(idx, idx);
+    ta.scrollTop = Math.max(0, line * edLineHeight() - 80);
+    edGutter();
+  }
   function edOutline() {
     var box = $('#edOutline');
     if (!edActive || edActive.type !== 'tex') { box.innerHTML = '<div class="ol-empty">打开 .tex 文件后，这里按 \\section / \\subsection 解析大纲。</div>'; return; }
-    var lines = $('#editorText').value.split('\n'); var html = ''; var count = 0;
-    lines.forEach(function (ln, i) {
-      var m = ln.match(/^\s*\\(section|subsection|subsubsection)\*?\{([^}]*)\}/);
-      if (!m) return;
-      count++;
-      var lv = m[1] === 'section' ? 1 : m[1] === 'subsection' ? 2 : 3;
-      html += '<button class="ol-item lv' + lv + '" type="button" data-line="' + i + '" title="跳转到第 ' + (i + 1) + ' 行">' + esc(m[2]) + '</button>';
-    });
-    box.innerHTML = count ? html : '<div class="ol-empty">当前文件没有 \\section 等章节命令。</div>';
-    $$('.ol-item', box).forEach(function (b) {
-      b.addEventListener('click', function () {
-        var ta = $('#editorText'); var ls = ta.value.split('\n'); var idx = 0;
-        for (var i = 0; i < +b.dataset.line; i++) idx += ls[i].length + 1;
-        ta.focus(); ta.setSelectionRange(idx, idx);
-        ta.scrollTop = Math.max(0, (+b.dataset.line) * edLineHeight() - 80);
-        edGutter();
+    var seq = ++edOlSeq;
+    var items = []; var fileOrder = 0;
+    function scan(ls, rel, path, fo) {
+      ls.forEach(function (ln, i) {
+        var m = ln.match(/^\s*\\(section|subsection|subsubsection)\*?\{([^}]*)\}/);
+        if (m) { items.push({ lv: m[1] === 'section' ? 1 : m[1] === 'subsection' ? 2 : 3, t: m[2], line: i, rel: rel, path: path, ord: fo * 1e6 + i }); return; }
+        var inc = ln.match(/^\s*\\(?:input|include)\{([^}]+)\}/);
+        if (inc && edLive && window.electronAPI && window.electronAPI.readFileContent) {
+          var name = inc[1].trim(); if (!/\.[a-z0-9]+$/i.test(name)) name += '.tex';
+          var pdir = (path || '').split(/[\\/]/).slice(0, -1).join('/');
+          var rdir = (rel || '').split('/').slice(0, -1).join('/');
+          var cp = pdir ? pdir + '/' + name : name;
+          var cr = rdir ? rdir + '/' + name : name;
+          var cfo = ++fileOrder;
+          window.electronAPI.readFileContent(cp).then(function (r) {
+            if (seq !== edOlSeq || !r || !r.success) return;
+            scan(String(r.text != null ? r.text : (r.content || '')).split('\n'), cr, cp, cfo);
+            render();
+          }).catch(function () {});
+        }
       });
-    });
+    }
+    function render() {
+      if (seq !== edOlSeq) return;
+      if (!items.length) { box.innerHTML = '<div class="ol-empty">当前文件没有 \\section 等章节命令。</div>'; return; }
+      items.sort(function (a, b) { return a.ord - b.ord; });
+      var html = '';
+      items.forEach(function (it, k) {
+        html += '<button class="ol-item lv' + it.lv + '" type="button" data-k="' + k + '" title="' + esc(it.rel) + ' 第 ' + (it.line + 1) + ' 行">' + esc(it.t) + '</button>';
+      });
+      box.innerHTML = html;
+      $$('.ol-item', box).forEach(function (b) {
+        b.addEventListener('click', function () {
+          var it = items[+b.dataset.k]; if (!it) return;
+          if (edActive && it.path === edActive.path) { edJumpLine(it.line); return; }
+          var n = edNodes.filter(function (x) { return x.path === it.path; })[0] ||
+            { rel: it.rel, path: it.path, name: it.path.split(/[\\/]/).pop(), type: 'tex', dir: it.rel.split('/').slice(0, -1).join('/') };
+          edOpen(n, it.line);
+        });
+      });
+    }
+    scan($('#editorText').value.split('\n'), edActive.rel, edActive.path, 0);
+    render();
   }
   function edRenderTree() {
     var groups = {}; var order = [];
@@ -593,7 +626,7 @@
     edEditTimer = setTimeout(function () { edGutter(); edOutline(); }, 120);
   }
   var edOpenSeq = 0;
-  function edOpen(n) {
+  function edOpen(n, jumpLine) {
     if (edLive && /\.(docx|xlsx|xls|pdf|png|jpe?g|gif|zip|exe)$/i.test(n.name)) { toast('二进制文件不在代码编辑器中打开：' + n.rel, { icon: 'info' }); return; }
     if (edDirty && edActive) edSave(true);
     var seq = ++edOpenSeq;
@@ -603,6 +636,7 @@
       edLastVal = content; $('#editorText').value = content; $('#editorText').scrollTop = 0;
       $('#edEmpty').hidden = true; $('#edCode').hidden = false;
       edPathLabel(); edGutter(); edOutline(); edRenderTree();
+      if (jumpLine != null) edJumpLine(jumpLine);
     }
     if (edLive) {
       window.electronAPI.readFileContent(n.path).then(function (r) {
