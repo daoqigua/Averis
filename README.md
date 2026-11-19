@@ -5,6 +5,11 @@
 
 > 本仓库只包含**客户端 UI 与框架代码**。求解内核、论文规则库与提示词资产不包含在内，因此本仓库不能单独构建出完整求解客户端；Windows 安装包通过 Releases / 交流群发布。
 
+## 下载与交流群
+
+- Windows 安装包：[Releases 下载](https://github.com/daoqigua/Averis/releases/latest)
+- **没有魔法、网络无法访问 GitHub？加 QQ 群：1104949817** —— 群文件提供软件安装包，进群即可下载，群内交流答疑。
+
 ![题目与附件资料分开上传](assets/workbench.png)
 
 ![Averis LaTeX 编辑器](assets/editor.png)
@@ -20,7 +25,7 @@
 
 ## 快速开始
 
-1. 获取 Windows 客户端（Releases 或交流群）。
+1. 获取 Windows 客户端（Releases 或 QQ 群 1104949817 群文件）。
 2. 在「求解配置」中填入模型 API Key，选择模型。
 3. 点「题目」上传赛题，点「附件资料」上传数据。
 4. 发送任务，等待求解完成，在产出面板打开 PDF / Word / LaTeX 工程。
