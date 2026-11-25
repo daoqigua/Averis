@@ -98,6 +98,7 @@
     $$('.view').forEach(function (s) { s.classList.toggle('active', s.id === 'view-' + v); });
     if (v === 'me') renderMeReal();   // 每次进入「我的」刷新真实用量
     if (v === 'editor') edInit();     // 编辑器懒初始化（首次进入才连内核写作项目）
+    if (v === 'workbench') loadRealSessions(); // 回工作台刷新真实任务历史
   }
   $$('.rail-item[data-view]').forEach(function (btn) {
     btn.addEventListener('click', function () { switchView(btn.dataset.view); });
@@ -105,6 +106,11 @@
   $('#btnAvatar').addEventListener('click', function () { switchView('me'); });
   $('#btnGoWorkbench').addEventListener('click', function () { switchView('workbench'); $('#chatInput').focus(); });
   $('#btnHelp').addEventListener('click', function () { toast('Averis：粘贴赛题 → 自动求解 → 论文/代码/支撑材料，一屏完成。', { icon: 'spark' }); });
+  // 顶栏模型徽标：未配置时直接进入 API 配置，已配置时也作为快捷入口
+  $('#topModelChip').addEventListener('click', function () { openApiSettings(); });
+  $('#topModelChip').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openApiSettings(); }
+  });
 
   // ---------- 主题（持久化 + 图标切换） ----------
   var THEME_KEY = 'averis.theme';
@@ -158,45 +164,487 @@
         '<span class="si-ico">' + svg(s.icon, 16) + '</span><div class="si-body">' +
         '<div class="si-title">' + esc(s.title) + '</div>' +
         '<div class="si-meta"><span class="si-badge' + (s.run && !asDemo ? ' run' : '') + '">' + esc(asDemo ? '演示' : s.badge) + '</span>' + esc(s.time) + '</div>' +
-        '</div><button class="si-del" data-del="' + esc(s.id) + '" title="删除会话" aria-label="删除会话">' + svg('trash', 14) + '</button></div>';
+        (s.real && s.path ? '<div class="si-path" title="' + esc(s.path) + '">' + esc(s.path) + '</div>' : '') +
+        '</div><button class="si-del" data-del="' + esc(s.id) + '" title="' + (s.real ? '从列表移除（磁盘文件保留）' : '删除会话') + '" aria-label="删除会话">' + svg('trash', 14) + '</button></div>';
     }).join('');
 
     $$('.session-item', box).forEach(function (el) {
-      function activate() {
-        activeSessionId = el.dataset.id;
-        $$('.session-item', box).forEach(function (x) { x.classList.toggle('active', x === el); });
-        var s = sessions.find(function (x) { return x.id === el.dataset.id; });
-        $('#chatTitle').textContent = s.title;
-        $('#topProjectChip').textContent = s.title;
-        toast('已切换到：' + s.title, { icon: 'check' });
-      }
+      function activate() { activateSession(el.dataset.id); }
       el.addEventListener('click', function (e) { if (!e.target.closest('.si-del')) activate(); });
       el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); activate(); } });
     });
     $$('.si-del', box).forEach(function (b) {
       b.addEventListener('click', function (e) {
         e.stopPropagation();
+        if (busy()) { toast('请先停止当前任务，再移除会话', { icon: 'info' }); return; }
         var id = b.dataset.del;
         var idx = sessions.findIndex(function (s) { return s.id === id; });
-        var removed = sessions.splice(idx, 1)[0];
-        var wasActive = activeSessionId === id;
-        if (wasActive) activeSessionId = sessions.length ? sessions[0].id : null;
-        if (wasActive) {
-          // 删掉当前会话后标题/项目 chip 必须跟着复位，不能停留在已删除的任务上
-          var nxt = sessions.filter(function (x) { return x.id === activeSessionId; })[0];
-          $('#chatTitle').textContent = nxt ? nxt.title : '开始一个新的建模任务';
-          $('#topProjectChip').textContent = nxt ? nxt.title : '未选择项目';
+        var removed = sessions[idx];
+        if (!removed) return;
+        function commitRemove() {
+          sessions.splice(idx, 1);
+          if (removed.real) { var h = hiddenSet(); h.push(removed.id); try { localStorage.setItem(HIDE_KEY, JSON.stringify(h)); } catch (e) {} }
+          var wasActive = activeSessionId === id;
+          if (wasActive) {
+            // Never silently target another project while the deleted task's conversation remains visible.
+            activeSessionId = null;
+            $('#chatFlow').innerHTML = ''; renderOutputs([]); $('#stageBar').hidden = true;
+            $('#chatInput').value = ''; syncSend();
+            $('#chatTitle').textContent = '开始一个新的建模任务';
+            $('#topProjectChip').textContent = '未选择项目';
+          }
+          renderSessions(); renderRecent();
+          toast('已从列表移除「' + removed.title + '」' + (removed.real ? '（磁盘文件保留）' : ''), {
+            icon: 'trash', action: '撤销',
+            onAction: function () {
+              if (removed.real) { try { localStorage.setItem(HIDE_KEY, JSON.stringify(hiddenSet().filter(function (x) { return x !== removed.id; }))); } catch (e) {} }
+              sessions.splice(Math.min(idx, sessions.length), 0, removed); renderSessions(); renderRecent();
+            }
+          });
         }
-        renderSessions(); renderRecent();
-        toast('已删除「' + removed.title + '」', {
-          icon: 'trash', action: '撤销',
-          onAction: function () { sessions.splice(Math.min(idx, sessions.length), 0, removed); renderSessions(); renderRecent(); }
-        });
+        if (!removed.real) { commitRemove(); return; }
+        pending = true; syncSend();
+        flushChatSession(removed).then(commitRemove).catch(function (err) {
+          toast('会话尚未保存，未从列表移除：' + err.message, { icon: 'info' });
+        }).finally(function () { pending = false; syncSend(); });
       });
     });
   }
   $('#sessionSearch').addEventListener('input', function () { sessionQuery = this.value; renderSessions(); });
   renderSessions();
+
+  // ---------- 真实任务历史：内核 list-workspace-tasks 扫描工作区，替换内置演示样例 ----------
+  var HIDE_KEY = 'averisHiddenSessions';
+  var SESSION_PATH_PREFIX = 'project:';
+  function hiddenSet() { try { var h = JSON.parse(localStorage.getItem(HIDE_KEY) || '[]'); return Array.isArray(h) ? h : []; } catch (e) { return []; } }
+  // Directory names are only unique inside one workspace root. The normalized
+  // full project path is the stable identity across refreshes and restarts.
+  function normalizeProjectPath(value) {
+    return String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  }
+  function sessionIdForPath(value) {
+    var normalized = normalizeProjectPath(value);
+    return normalized ? SESSION_PATH_PREFIX + normalized : '';
+  }
+  function sameProjectPath(a, b) {
+    var left = normalizeProjectPath(a), right = normalizeProjectPath(b);
+    return !!left && left === right;
+  }
+  function migrateHiddenSessions(tasks) {
+    var hide = hiddenSet(), next = [], changed = false;
+    hide.forEach(function (value) {
+      if (typeof value !== 'string' || !value) { changed = true; return; }
+      if (value.indexOf(SESSION_PATH_PREFIX) === 0) {
+        if (next.indexOf(value) < 0) next.push(value); else changed = true;
+        return;
+      }
+      var matches = tasks.filter(function (t) { return t && t.dirName === value && sessionIdForPath(t.path); });
+      if (matches.length === 1) {
+        var id = sessionIdForPath(matches[0].path);
+        if (next.indexOf(id) < 0) next.push(id); else changed = true;
+        changed = true;
+      } else if (matches.length > 1) {
+        // A legacy basename cannot say which same-name project was removed.
+        // Show all candidates rather than silently hiding unrelated work.
+        changed = true;
+      } else next.push(value);
+    });
+    if (changed) { try { localStorage.setItem(HIDE_KEY, JSON.stringify(next)); } catch (e) {} }
+    return next;
+  }
+  var historyRequest = 0;
+  function selectedSession() { return sessions.find(function (s) { return s.id === activeSessionId; }); }
+  var chatSaveTimer = null;
+  // The main process keeps a per-project write watermark. A renderer reload
+  // must continue above it, otherwise every new snapshot would be skipped.
+  var chatSaveRevision = Date.now();
+  try {
+    var storedChatRevision = Number(window.sessionStorage && window.sessionStorage.getItem('averisChatSaveRevision'));
+    if (Number.isSafeInteger(storedChatRevision) && storedChatRevision > chatSaveRevision) chatSaveRevision = storedChatRevision;
+  } catch (_) {}
+  var chatDirtySignaled = false;
+  var appClosing = false;
+  function syncChatDirty() {
+    var api = window.electronAPI;
+    if (!api || typeof api.setChatDirty !== 'function') return;
+    var dirty = sessions.some(function (s) { return !s.demo && !!s.chatDirty; });
+    if (dirty === chatDirtySignaled) return;
+    try { api.setChatDirty(dirty); chatDirtySignaled = dirty; } catch (e) {}
+  }
+  function scheduleChatSave() {
+    var api = window.electronAPI;
+    if (!api || !api.averisSaveChat) return;
+    var s = selectedSession();
+    if (s && !s.demo && s.real && s.path) {
+      s.chatDirty = true;
+      s.chatSaveRevision = ++chatSaveRevision;
+      syncChatDirty();
+    }
+    if (chatSaveTimer) return;
+    var id = activeSessionId;
+    chatSaveTimer = setTimeout(function () {
+      chatSaveTimer = null;
+      if (activeSessionId === id) saveSessionView(undefined, true);
+    }, 1500);
+  }
+  function chatHasClass(node, name) {
+    return !!node && !!node.classList && node.classList.contains(name);
+  }
+  function collectChatContent(body) {
+    var content = [];
+    function pushText(value) {
+      if (typeof value !== 'string' || !value) return;
+      var last = content[content.length - 1];
+      if (last && last.type === 'text') last.text += value;
+      else content.push({ type: 'text', text: value });
+    }
+    function push(block) { content.push(block); }
+    function chipBlock(chip) {
+      var text = (chip.textContent || '').replace(/\s+/g, ' ').trim();
+      var icon = 'sliders';
+      if (text.indexOf('题目：') === 0) icon = 'file';
+      else if (text.indexOf('附件资料：') === 0) icon = 'clip';
+      else if (text.indexOf('例题演示') === 0) icon = 'flask';
+      else if (text.indexOf('文件将按') === 0) icon = 'info';
+      return { type: 'chip', text: text, icon: icon, demo: chatHasClass(chip, 'demo') };
+    }
+    function visit(node) {
+      if (!node) return;
+      if (node.nodeType === 3) { pushText(node.textContent || ''); return; }
+      if (node.nodeType !== 1) return;
+      if (chatHasClass(node, 'typing')) return;
+      if (chatHasClass(node, 'attach-chip')) { push(chipBlock(node)); return; }
+      if (chatHasClass(node, 'agent-stage')) {
+        var step = node.querySelector ? node.querySelector('.stage-step') : null;
+        var ico = step && step.querySelector ? step.querySelector('.step-ico') : null;
+        var label = step && step.querySelector ? step.querySelector('strong') : null;
+        var desc = step && step.querySelector ? step.querySelector('.step-desc') : null;
+        var index = ico ? Number(ico.textContent) - 1 : -1;
+        if (step && index >= 0 && index <= 4 && index % 1 === 0 && label && desc) {
+          push({ type: 'stage', index: index, label: label.textContent || '', desc: desc.textContent || '' });
+        } else pushText(node.textContent || '');
+        return;
+      }
+      if (chatHasClass(node, 'agent-stream')) { push({ type: 'stream', text: node.textContent || '' }); return; }
+      if (node.tagName === 'P') {
+        var tone = 'default';
+        var style = node.getAttribute ? node.getAttribute('style') || '' : '';
+        var strong = node.querySelector ? node.querySelector('strong') : null;
+        if (strong && strong.getAttribute) style += ' ' + (strong.getAttribute('style') || '');
+        if (style.indexOf('var(--err)') >= 0) tone = 'error';
+        else if (style.indexOf('var(--ok)') >= 0) tone = 'success';
+        push({ type: 'paragraph', text: node.textContent || '', tone: tone });
+        return;
+      }
+      if (node.children && node.children.length === 1 && chatHasClass(node.children[0], 'attach-chip')) {
+        push(chipBlock(node.children[0])); return;
+      }
+      var chip = node.querySelector ? node.querySelector('.attach-chip') : null;
+      if (chip && (node.textContent || '').trim() === (chip.textContent || '').trim()) { push(chipBlock(chip)); return; }
+      var children = node.childNodes || [];
+      for (var i = 0; i < children.length; i++) visit(children[i]);
+    }
+    if (body && body.childNodes) {
+      for (var i = 0; i < body.childNodes.length; i++) visit(body.childNodes[i]);
+    }
+    if (!content.length && body && body.textContent) pushText(body.textContent);
+    return content;
+  }
+  function collectChatMessage(node) {
+    var body = node.querySelector('.msg-text');
+    var message = { role: node.classList.contains('user') ? 'user' : 'ai', text: body ? body.textContent : '' };
+    if (body && body.childNodes) message.content = collectChatContent(body);
+    return message;
+  }
+  function collectChatMessages() {
+    return $$('#chatFlow .msg').filter(function (node) {
+      return !chatHasClass(node, 'chat-transient');
+    }).map(collectChatMessage);
+  }
+  function collectChatMessagesFromHtml(html) {
+    var root = document.createElement('div');
+    root.innerHTML = html || '';
+    return Array.prototype.filter.call(root.querySelectorAll('.msg'), function (node) {
+      return !chatHasClass(node, 'chat-transient');
+    }).map(collectChatMessage);
+  }
+  function renderChatContent(content) {
+    if (!Array.isArray(content) || content.length > 200) throw new Error('历史可见内容格式无效');
+    return content.map(function (block) {
+      if (!block || typeof block !== 'object' || Array.isArray(block)) throw new Error('历史可见内容块无效');
+      if (block.type === 'text') {
+        if (typeof block.text !== 'string') throw new Error('历史文本内容无效');
+        return '<span class="chat-text-block">' + esc(block.text) + '</span>';
+      }
+      if (block.type === 'stream') {
+        if (typeof block.text !== 'string') throw new Error('历史流式内容无效');
+        return '<div class="agent-stream">' + esc(block.text) + '</div>';
+      }
+      if (block.type === 'chip') {
+        if (typeof block.text !== 'string' || ['file', 'clip', 'sliders', 'flask', 'info'].indexOf(block.icon) < 0 || typeof block.demo !== 'boolean') {
+          throw new Error('历史附件标签无效');
+        }
+        return '<div><span class="attach-chip' + (block.demo ? ' demo' : '') + '">' + svg(block.icon, 12) + ' ' + esc(block.text) + '</span></div>';
+      }
+      if (block.type === 'stage') {
+        if (!Number.isInteger(block.index) || block.index < 0 || block.index > 4 || typeof block.label !== 'string' || typeof block.desc !== 'string') {
+          throw new Error('历史阶段信息无效');
+        }
+        return '<div class="agent-stage"><div class="stage-step active"><span class="step-ico">' + (block.index + 1) + '</span>' +
+          '<div><strong>' + esc(block.label) + '</strong></div><span class="step-desc">' + esc(block.desc) + '</span></div></div>';
+      }
+      if (block.type === 'paragraph') {
+        if (typeof block.text !== 'string' || ['default', 'success', 'error'].indexOf(block.tone) < 0) throw new Error('历史状态内容无效');
+        var color = block.tone === 'error' ? 'var(--err)' : block.tone === 'success' ? 'var(--ok)' : '';
+        return '<p' + (color ? ' style="color:' + color + '"' : '') + '>' + esc(block.text) + '</p>';
+      }
+      throw new Error('历史包含不支持的可见内容块');
+    }).join('');
+  }
+  function saveSessionView(target, durable) {
+    var s = target || selectedSession();
+    var isActive = !!s && s.id === activeSessionId;
+    if (isActive && chatSaveTimer) { clearTimeout(chatSaveTimer); chatSaveTimer = null; }
+    if (s && !s.demo) {
+      s.chatHtml = isActive ? $('#chatFlow').innerHTML : (s.chatHtml || '');
+      var api = window.electronAPI;
+      if (s.real && s.path && !s.historyReadFailed && api && (api.averisSaveChat || (durable && api.averisSaveChatSync))) {
+        var messages = isActive ? collectChatMessages() : collectChatMessagesFromHtml(s.chatHtml);
+        if (messages.length || s.chatDirty || durable) {
+          var revision = ++chatSaveRevision;
+          try { if (window.sessionStorage) window.sessionStorage.setItem('averisChatSaveRevision', String(revision)); } catch (_) {}
+          s.chatSaveRevision = revision;
+          s.chatDirty = true;
+          syncChatDirty();
+          s.chatSaveError = null;
+          var previous = Promise.resolve(s.savePromise).catch(function () {});
+          var write;
+          if (durable && typeof api.averisSaveChatSync === 'function') {
+            // Critical boundaries must reach the main-process atomic write before
+            // the UI switches tasks, launches a model, or reports completion.
+            try { write = Promise.resolve(api.averisSaveChatSync(s.path, messages, s.mode, revision)); }
+            catch (e) { write = Promise.reject(e); }
+          } else {
+            write = previous.then(function () { return api.averisSaveChat(s.path, messages, s.mode, revision); });
+          }
+          s.savePromise = previous.then(function () { return write; }).then(function (r) {
+            if (!r || !r.success) throw new Error((r && r.error) || '保存失败');
+            if (s.chatSaveRevision === revision) { s.chatDirty = false; s.chatSaveError = null; syncChatDirty(); }
+          }).catch(function (e) {
+            if (s.chatSaveRevision === revision) {
+              s.chatSaveError = e.message; syncChatDirty(); toast('对话未保存到磁盘：' + e.message, { icon: 'info' });
+            }
+          });
+        }
+      }
+    }
+    return Promise.resolve(s && s.savePromise);
+  }
+  function flushChatSession(s) {
+    if (!s || s.demo) return Promise.resolve();
+    function verifySaved() {
+      if (s.chatSaveError) throw new Error('对话尚未保存到磁盘：' + s.chatSaveError);
+      if (s.historyReadFailed) throw new Error('历史对话读取失败，不能确认当前内容');
+      if (s.chatDirty) throw new Error('仍有对话修改尚未确认保存');
+    }
+    // An unchanged in-flight write already contains the latest snapshot. Waiting
+    // for it avoids enqueueing a duplicate IPC write that can never be released.
+    return Promise.resolve(s.savePromise).then(function () {
+      if (!s.historyReadFailed && (s.chatDirty || s.chatSaveError)) {
+        return Promise.resolve(saveSessionView(s, true)).then(verifySaved);
+      }
+      verifySaved();
+    });
+  }
+  function prepareAppClose() {
+    if (appClosing) return Promise.resolve(false);
+    if (running || pending || stopping) { toast('任务正在准备、运行或收尾，请先停止并等待结束', { icon: 'info' }); return Promise.resolve(false); }
+    appClosing = true; syncSend();
+    var pendingChats = sessions.filter(function (s) {
+      return s && !s.demo && s.real && (s.id === activeSessionId || s.savePromise || s.chatDirty || s.chatSaveError);
+    });
+    var editorAttempts = 0;
+    function flushEditor() {
+      if (edSavePending) return Promise.resolve(edSavePromise).then(function (r) {
+        if (r !== true) throw new Error('编辑器保存尚未成功');
+        return flushEditor();
+      });
+      if (!edDirty) return Promise.resolve(true);
+      if (++editorAttempts > 3) throw new Error('编辑器内容仍在变化，请停止输入后重试关闭');
+      return edSave(true).then(function (ok) {
+        if (ok !== true) throw new Error('编辑器自动保存失败');
+        return flushEditor();
+      });
+    }
+    return Promise.all(pendingChats.map(flushChatSession)).then(flushEditor).then(function () {
+      var api = window.electronAPI || {};
+      try { api.setPaperDirty(false); api.setChatDirty(false); } catch (e) {}
+      return Promise.resolve(api.forceCloseApp()).then(function (r) {
+        if (!r || r.success === false) throw new Error((r && r.error) || '关闭请求失败');
+        return true;
+      });
+    }).catch(function (e) {
+      appClosing = false; syncSend();
+      toast('自动保存失败或尚未完成，已保持窗口打开：' + e.message, { icon: 'info' });
+      return false;
+    });
+  }
+  function prepareRevisionRestore(s) {
+    return flushChatSession(s).catch(function (e) {
+      throw new Error(e.message + '，不能恢复版本');
+    });
+  }
+  function addTransientMsg(text) {
+    var wrap = addMsg('ai', text);
+    if (wrap && wrap.classList) wrap.classList.add('chat-transient');
+    return wrap;
+  }
+  function loadSessionHistory(s) {
+    if (s.historyLoaded) return Promise.resolve();
+    var api = window.electronAPI || {};
+    var preserveLocalState = !!s.historyReadFailed && !!s.chatDirty;
+    var skipDiskHistory = false;
+    return Promise.resolve(s.savePromise).then(function () {
+      if (s.chatDirty && !s.historyReadFailed) return saveSessionView(s, true);
+    }).then(function () {
+      if (!s.historyReadFailed && (s.chatSaveError || s.chatDirty)) {
+        skipDiskHistory = true;
+        toast('当前对话尚未保存，暂不加载磁盘历史：' + (s.chatSaveError || '保存未完成'), { icon: 'info' });
+        return null;
+      }
+      return api.averisLoadChat ? api.averisLoadChat(s.path) : { success: true, found: false };
+    }).then(function (r) {
+      if (skipDiskHistory) return;
+      if (!r || !r.success) throw new Error((r && r.error) || '无法读取对话');
+      if (r.found) {
+        if (!preserveLocalState && ['按要求修改', '只改论文', '重做指定小问'].indexOf(r.mode) >= 0) s.mode = r.mode;
+        return r.messages;
+      }
+      return api.readWsStateByPath ? Promise.resolve(api.readWsStateByPath(s.path)).then(function (st) { return (st && st.chatHistory) || []; }) : [];
+    }).then(function (messages) {
+      if (activeSessionId !== s.id) return;
+      if (!Array.isArray(messages)) throw new Error('历史对话格式无效');
+      var valid = messages.filter(function (m) { return m && ['user', 'ai', 'assistant'].indexOf(m.role) >= 0 && typeof m.text === 'string'; });
+      if (valid.length !== messages.length) throw new Error('历史对话包含无法识别的消息，未覆盖原记录');
+      var draft = [];
+      if (preserveLocalState) {
+        var current = collectChatMessages();
+        var baseline = Array.isArray(s.historyFailureSnapshot) ? s.historyFailureSnapshot : [];
+        var baselineMatches = baseline.every(function (m, i) {
+          return current[i] && current[i].role === m.role && current[i].text === m.text &&
+            JSON.stringify(current[i].content) === JSON.stringify(m.content);
+        });
+        // If the visible prefix changed unexpectedly, preserve every visible
+        // message rather than risk discarding a draft during recovery.
+        draft = baselineMatches ? current.slice(baseline.length) : current;
+      }
+      var restored = valid.concat(draft);
+      var rendered = restored.map(function (m) {
+        return { role: m.role === 'user' ? 'user' : 'ai', html: m.content === undefined ? '<div class="agent-stream">' + esc(m.text) + '</div>' : renderChatContent(m.content) };
+      });
+      $('#chatFlow').innerHTML = '';
+      if (restored.length) {
+        rendered.forEach(function (m) { addMsg(m.role, m.html); });
+        addTransientMsg('已恢复保存的对话记录；续改仍以原项目文件为依据，历史记录不保证等于模型的完整上下文。');
+      } else {
+        addTransientMsg('原任务暂无已保存的对话；输入修改要求即可在原项目继续处理，本次会读取项目文件。');
+      }
+      s.historyLoaded = true;
+      s.historyReadFailed = false;
+      delete s.historyFailureSnapshot;
+      if (preserveLocalState && (draft.length || s.chatDirty)) scheduleChatSave();
+    }).catch(function (e) {
+      s.historyLoaded = false;
+      s.historyReadFailed = true;
+      if (!Array.isArray(s.historyFailureSnapshot)) {
+        s.historyFailureSnapshot = activeSessionId === s.id ? collectChatMessages() : collectChatMessagesFromHtml(s.chatHtml || '');
+      }
+      toast('历史对话未载入，将保留原记录不覆盖：' + e.message, { icon: 'info' });
+    });
+  }
+  function resetSessionAfterRevisionRestore(s) {
+    s.chatHtml = ''; s.chatSaveError = null; s.historyReadFailed = false; s.historyLoaded = false;
+    delete s.historyFailureSnapshot;
+    s.artifacts = []; s.result = null;
+  }
+  function activateSession(id) {
+    if (busy()) { toast('请先停止当前任务，再切换会话', { icon: 'info' }); return; }
+    var s = sessions.find(function (x) { return x.id === id; });
+    if (!s) return;
+    saveSessionView(undefined, true); activeSessionId = id;
+    if (s.real && modes.indexOf(s.mode) >= 0) modeIdx = modes.indexOf(s.mode);
+    switchView('workbench');
+    $('#chatTitle').textContent = s.title; $('#topProjectChip').textContent = s.title;
+    $('#chatFlow').innerHTML = s.chatHtml || '';
+    if (!s.chatHtml) addTransientMsg(s.real
+      ? '已选择原任务：' + esc(s.title) + '。输入修改要求即可在原项目继续处理；本次未加载历史对话，修改时会读取项目文件。'
+      : '这是演示会话；真实解题请点击「新任务」。');
+    $('#stageBar').hidden = true;
+    renderOutputs(s.artifacts || [], !!s.demo);
+    $('#chatInput').value = ''; uploads = { problem: [], data: [] }; renderAttachments();
+    renderSessions(); syncSend(); $('#chatInput').focus();
+    if (s.real) {
+      pending = true; syncSend();
+      var language = s.lang ? Promise.resolve(s.lang) : (window.electronAPI.readFileContent
+        ? Promise.resolve(window.electronAPI.readFileContent(s.path.replace(/[\\/]+$/, '') + '/求解/task-preferences.json')).then(function (r) {
+          if (!r || !r.success) return null;
+          var pref = JSON.parse(r.text);
+          return pref.writingLang === 'en' ? 'English' : pref.writingLang === 'zh' ? '中文' : null;
+        }) : Promise.resolve(null));
+      var artifacts = bridge.scanProject ? bridge.scanProject(s.path).then(function (r) {
+        if (activeSessionId !== s.id) return;
+        s.artifacts = r.artifacts; renderOutputs(s.artifacts, false);
+        if (r.warning) toast(r.warning, { icon: 'info' });
+      }).catch(function (e) { toast('产物扫描失败：' + e.message, { icon: 'info' }); }) : Promise.resolve();
+      return Promise.all([language.catch(function () { return null; }), loadSessionHistory(s), artifacts]).then(function (values) {
+        if (activeSessionId !== s.id) return;
+        var lang = values[0];
+        if (lang) { s.lang = lang; cfg.lang = lang; segSet('#cfgLang', lang); renderCfgStrip(); }
+        if (modes.indexOf(s.mode) >= 0) modeIdx = modes.indexOf(s.mode);
+        pending = false; syncSend();
+      });
+    }
+    return Promise.resolve();
+  }
+  function loadRealSessions() {
+    if (!bridge.isLive() || !window.electronAPI || !window.electronAPI.listWorkspaceTasks) return;
+    var request = ++historyRequest;
+    return window.electronAPI.listWorkspaceTasks().then(function (r) {
+      if (request !== historyRequest || !r || !Array.isArray(r.tasks)) return;
+      var tasks = Array.isArray(r.tasks) ? r.tasks.filter(function (t) { return t && typeof t.path === 'string' && t.path; }) : [];
+      var hide = migrateHiddenSessions(tasks);
+      var old = sessions;
+      var local = old.filter(function (s) {
+        var id = s.path ? sessionIdForPath(s.path) : s.id;
+        return (s.local || (s.real && s.id === activeSessionId)) && hide.indexOf(id) < 0;
+      });
+      var history = tasks.filter(function (t) {
+        return hide.indexOf(sessionIdForPath(t.path)) < 0 && t.started !== false && t.status !== '未启动';
+      }).map(function (t) {
+        var id = sessionIdForPath(t.path);
+        var existing = old.find(function (s) { return sameProjectPath(s.path, t.path); });
+        if (existing && local.indexOf(existing) >= 0) { existing.id = id; existing.path = t.path; return existing; }
+        var m = String(t.dirName || '').match(/^(.+?)_(\d{4})-(\d{2})-(\d{2})_(\d{2})-(\d{2})/);
+        return Object.assign({}, existing || {}, {
+          id: id, title: m ? m[1] : t.name, badge: t.status, real: true, path: t.path,
+          time: m ? (m[3] + '-' + m[4] + ' ' + m[5] + ':' + m[6]) : '',
+          icon: t.status === '已完成' ? 'chart' : (t.status === '进行中' ? 'bolt' : 'flask')
+        });
+      });
+      sessions = local.concat(history.filter(function (s) { return local.indexOf(s) < 0; }));
+      // Do not auto-select history: the welcome composer must remain a new task.
+      if (!sessions.some(function (s) { return s.id === activeSessionId; })) activeSessionId = null;
+      renderSessions(); renderRecent();
+    }).catch(function () {});
+  }
+  function openTaskInEditor(s) {
+    if (edDirty) { toast('编辑器有未保存的修改，请先保存，再打开其他项目', { icon: 'info' }); return; }
+    switchView('editor');
+    edInit();
+    edAttachProject({ name: s.title, path: s.path, texFile: null, pdfFile: null });
+    toast('已在编辑器打开：' + s.title, { icon: 'check' });
+  }
+  loadRealSessions();
 
   // Ctrl+K 聚焦搜索
   document.addEventListener('keydown', function (e) {
@@ -226,20 +674,26 @@
     });
   }
   function addFiles(fileList, kind) {
-    var list = uploads[kind], n = 0;
+    var list = uploads[kind], n = 0, rejected = [];
     Array.prototype.forEach.call(fileList, function (f) {
-      if (list.some(function (x) { return x.name === f.name; })) return;
       var p = '';
       try { p = (window.electronAPI && window.electronAPI.getFilePath) ? (window.electronAPI.getFilePath(f) || '') : ''; } catch (e) {}
+      if (bridge.isLive() && !p) { rejected.push(f.name + '：无法取得本机路径，请重新选择'); return; }
+      var existing = list.find(function (x) { return x.name.toLowerCase() === f.name.toLowerCase(); });
+      if (existing) {
+        if (existing.path !== p) rejected.push(f.name + '：同名文件来自不同目录，请重命名后添加');
+        return;
+      }
       list.push({ name: f.name, path: p }); n++;
     });
+    if (rejected.length) toast('未添加：' + rejected.join('；'), { icon: 'info' });
     if (n) {
       renderAttachments();
       var where = kind === 'problem' ? '题目/' : '数据/';
       toast(bridge.isLive()
         ? '已添加 ' + n + ' 个' + (kind === 'problem' ? '题目文件' : '附件资料') + '，将复制进 ' + where
         : '已添加 ' + n + ' 个' + (kind === 'problem' ? '题目文件' : '附件资料') + '（演示模式，仅记录文件名）', { icon: 'clip' });
-    } else if (Array.prototype.some.call(fileList, function () { return true; })) {
+    } else if (!rejected.length && Array.prototype.some.call(fileList, function () { return true; })) {
       toast('这些文件已在列表中', { icon: 'info' });
     }
   }
@@ -267,10 +721,15 @@
   });
 
   // ---------- 模式切换 ----------
-  var modes = ['完整求解', '只改论文', '重做某问']; var modeIdx = 0;
+  var modes = ['按要求修改', '只改论文', '重做指定小问']; var modeIdx = 0;
   $('#btnMode').addEventListener('click', function () {
+    if (busy() || !selectedSession() || !selectedSession().real) return;
     modeIdx = (modeIdx + 1) % modes.length;
+    var session = selectedSession();
+    session.mode = modes[modeIdx];
     $('#modeLabel').textContent = modes[modeIdx];
+    if (session.historyReadFailed) scheduleChatSave();
+    else saveSessionView(session, true);
     toast('任务模式：' + modes[modeIdx], { icon: 'spark' });
   });
 
@@ -284,15 +743,28 @@
     $('#outputCount').textContent = list.length;
     var badge = $('#outputBadge');
     if (badge) { badge.textContent = list.length; badge.hidden = !list.length || panelState.output; }
+    // 打包下载只对真实项目开放；演示清单没有磁盘文件
+    var allowDownload = !outputsDemo && list.length > 0;
+    var dlBtn = $('#btnDownloadProject');
+    if (dlBtn) {
+      var cur = selectedSession();
+      dlBtn.hidden = !(allowDownload && cur && cur.path);
+      dlBtn.disabled = false;
+      dlBtn.title = '把「求解 / 论文 / 数据 / 导出」打成一个 ZIP 下载';
+    }
     var groups = {};
     list.forEach(function (f) { (groups[f.group] = groups[f.group] || []).push(f); });
     $('#outputGroups').innerHTML = Object.keys(groups).map(function (g) {
       return '<div class="out-group"><div class="out-group-title">' + esc(g) + '</div>' +
         groups[g].map(function (f) {
+          var canSave = !outputsDemo && !!f.path;
           return '<div class="out-file" data-name="' + esc(f.name) + '"' + (f.path ? ' data-path="' + esc(f.path) + '"' : '') + ' role="button" tabindex="0">' +
             '<span class="of-ico ' + esc(f.type) + '">' + svg(FILE_ICON[f.type] || 'file', 16) + '</span>' +
-            '<div class="of-body"><div class="of-name">' + esc(f.name) + '</div><div class="of-meta">' + esc(f.size) + (outputsDemo ? ' · 演示样例' : '') + '</div></div>' +
-            '<span class="of-dl">打开' + svg('open', 12) + '</span></div>';
+            '<div class="of-body"><div class="of-name">' + esc(f.relativePath || f.name) + '</div><div class="of-meta">' + esc(f.size) + (outputsDemo ? ' · 演示样例' : '') + '</div></div>' +
+            '<span class="of-actions">' +
+              (canSave ? '<button type="button" class="of-save" title="保存副本到…" aria-label="保存副本到所选文件夹">' + svg('download', 13) + '</button>' : '') +
+              '<span class="of-dl">打开' + svg('open', 12) + '</span>' +
+            '</span></div>';
         }).join('') + '</div>';
     }).join('');
     $$('.out-file').forEach(function (el) {
@@ -310,8 +782,51 @@
       }
       el.addEventListener('click', open);
       el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+      var saveEl = el.querySelector('.of-save');
+      if (saveEl) {
+        saveEl.addEventListener('click', function (e) { e.stopPropagation(); saveOutputFile(el, saveEl); });
+        saveEl.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') e.stopPropagation(); });
+      }
     });
   }
+
+  // 单个产出保存副本：走内核 download-file（选文件夹、防覆盖、复制后校验非空）
+  function saveOutputFile(row, btn) {
+    if (outputsDemo) { toast('演示产出为样例清单，没有可保存的真实文件', { icon: 'info' }); return; }
+    if (!live || !window.electronAPI || typeof window.electronAPI.downloadFile !== 'function') {
+      toast('浏览器演示模式无法保存文件；请在 Averis 桌面端使用', { icon: 'info' }); return;
+    }
+    var p = row.dataset.path;
+    if (!p) { toast('未拿到文件路径，请到工作目录中保存', { icon: 'info' }); return; }
+    if (btn && btn.disabled) return;
+    if (btn) btn.disabled = true;
+    return Promise.resolve(window.electronAPI.downloadFile(p, row.dataset.name)).then(function (r) {
+      if (r && r.canceled) return;
+      if (r && r.success) toast('已保存：' + (r.path || row.dataset.name), { icon: 'download' });
+      else toast('保存失败：' + ((r && r.error) || '未知错误'), { icon: 'info' });
+    }).catch(function (e) {
+      toast('保存失败：' + ((e && e.message) || e), { icon: 'info' });
+    }).then(function () { if (btn) btn.disabled = false; });
+  }
+
+  // 整个项目打包下载：求解 / 论文 / 结果数据 / 导出
+  $('#btnDownloadProject').addEventListener('click', function () {
+    var btn = this;
+    var s = selectedSession();
+    if (!live || !window.electronAPI || typeof window.electronAPI.downloadProject !== 'function') {
+      toast('浏览器演示模式无法打包；请在 Averis 桌面端使用', { icon: 'info' }); return;
+    }
+    if (outputsDemo || !s || !s.path) { toast('当前没有可打包的真实项目', { icon: 'info' }); return; }
+    if (btn.disabled) return;
+    btn.disabled = true;
+    Promise.resolve(window.electronAPI.downloadProject(s.path)).then(function (r) {
+      if (r && r.canceled) return;
+      if (r && r.success) toast('已打包下载：' + (r.path || '所选文件夹') + (r.fileCount ? '（' + r.fileCount + ' 个文件）' : ''), { icon: 'download' });
+      else toast('打包失败：' + ((r && r.error) || '未知错误'), { icon: 'info' });
+    }).catch(function (e) {
+      toast('打包失败：' + ((e && e.message) || e), { icon: 'info' });
+    }).then(function () { btn.disabled = false; });
+  });
 
   // ---------- 阶段进度条 ----------
   function showStageBar(activeIndex) {
@@ -334,20 +849,31 @@
     $('#chatFlow').scrollTop = $('#chatFlow').scrollHeight;
     return wrap;
   }
-
   var running = false;
   var pending = false;       // preflight 异步间隙同步上锁，防并发提交/演示标志污染
   var stopping = false;      // abort 收尾期间拒绝新提交
   var currentTaskId = null;
   var demoTask = false;      // 本次提交是否为例题演示（不接模型）
   var outputsDemo = false;   // 当前产出清单是否为演示样例
-  function busy() { return running || pending || stopping; }
-  function syncSend() { $('#btnSend').disabled = busy() || !$('#chatInput').value.trim(); }
+  function busy() { return running || pending || stopping || appClosing; }
+  function syncSend() {
+    $('#btnSend').disabled = busy() || !$('#chatInput').value.trim();
+    var s = selectedSession(), real = !!(s && s.real && s.path);
+    $('#taskContext').hidden = !real;
+    $('#taskPath').textContent = real ? s.path : '';
+    $('#btnTaskResume').disabled = busy() || !real;
+    $('#btnTaskEditor').disabled = busy() || !real;
+    $('#btnTaskVersions').disabled = busy() || !real;
+    $('#btnMode').disabled = busy() || !real;
+    $('#modeLabel').textContent = real ? ((modes && modes[modeIdx]) || '按要求修改') : '新题求解';
+  }
 
   function send(text, internal) {
     text = (text || '').trim();
     if (!text || busy()) return;
-    if (!internal && live && !demoTask) {
+    var selected = selectedSession();
+    var modifying = !!(selected && selected.real && selected.path);
+    if (!internal && live && !demoTask && !modifying) {
       var _hasProblem = uploads.problem.length > 0;
       if (!_hasProblem && text.replace(/\s/g, '').length < 30) {
         toast('请先点「题目」添加赛题文件；或粘贴至少 30 字的完整题面。「附件资料」是可选的数据文件。', { icon: 'info' });
@@ -355,19 +881,41 @@
       }
     }
     pending = true; syncSend();
-    preflight().then(function (ok) { pending = false; if (ok) startSend(text); else syncSend(); })
+    preflight().then(function (ok) { pending = false; if (ok && !appClosing) startSend(text); else syncSend(); })
       .catch(function () { pending = false; syncSend(); });
   }
 
-  function startSend(text) {
+  function startSend(text, resumeExisting) {
+    if (appClosing) return;
     $('#chatInput').value = ''; syncSend();
     var isDemo = demoTask || !live;
+    var session = selectedSession();
+    var existing = !!(!isDemo && session && session.real && session.path);
+    var reusePrepared = !!(!isDemo && !existing && session && !session.real && session.preparedPath);
+    resumeExisting = resumeExisting === true && existing;
+    var modifying = existing && !resumeExisting;
+    var failedContinuation = existing && !resumeExisting && ['失败', '待补齐', '已停止'].indexOf(session.badge) >= 0;
+    if (!isDemo && !existing && !reusePrepared) {
+      saveSessionView(undefined, true);
+      session = { id: 'pending-' + Date.now(), title: text.slice(0, 24), badge: '准备中',
+        time: '刚刚', icon: 'bolt', run: true, local: true };
+      sessions.unshift(session); activeSessionId = session.id;
+    }
+    session.mode = modes[modeIdx];
+    var recentChat = modifying ? collectChatMessages().slice(-20) : [];
+    if (!isDemo) {
+      session.local = true; session.run = true; session.badge = modifying ? '修改中' : '准备中';
+      sessionQuery = ''; $('#sessionSearch').value = '';
+      renderSessions(); renderRecent();
+    }
 
     // 快照：下面会清空上传列表
     var problemNames = uploads.problem.map(function (a) { return a.name; });
     var dataNames = uploads.data.map(function (a) { return a.name; });
     var attNames = problemNames.concat(dataNames);
-    var attPaths = uploads.problem.concat(uploads.data).map(function (a) { return a.path; }).filter(Boolean);
+    var attachedFiles = uploads.problem.map(function (a) { return { name: a.name, path: a.path, kind: 'problem' }; })
+      .concat(uploads.data.map(function (a) { return { name: a.name, path: a.path, kind: 'data' }; }));
+    var attPaths = attachedFiles.map(function (a) { return a.path; }).filter(Boolean);
     var attachmentKinds = {};
     uploads.problem.forEach(function (a) { if (a.path) attachmentKinds[a.path] = 'problem'; });
     uploads.data.forEach(function (a) { if (a.path) attachmentKinds[a.path] = 'data'; });
@@ -378,48 +926,104 @@
     if (isDemo) cfgChip += '<div><span class="attach-chip demo">' + svg('flask', 12) + ' 例题演示 · 不接模型</span></div>';
     else if (attNames.length) cfgChip += '<div><span class="attach-chip demo">' + svg('info', 12) + ' 文件将按「题目 / 附件资料」复制进 题目/ 与 数据/ 参与求解</span></div>';
     addMsg('user', esc(text) + att + cfgChip);
+    if (existing) saveSessionView(session, true);
+    if (failedContinuation) addMsg('ai', '继续说明：将在原项目 ' + esc(session.path) + ' 继续未完成部分；本次会调用模型并消耗模型额度。若原模型会话不可用，将依据项目文件重建上下文。');
     uploads = { problem: [], data: [] }; renderAttachments();
 
-    running = true;
+    running = true; syncSend();
     $('#btnSend').hidden = true; $('#btnStop').hidden = false;
-    $('#chatStatus').textContent = '求解中'; $('#chatStatus').classList.add('running');
+    $('#chatStatus').textContent = modifying ? '修改中' : '求解中'; $('#chatStatus').classList.add('running');
     $('#chatFlow').setAttribute('aria-busy', 'true');
-    $('#topProjectChip').textContent = text.slice(0, 14) + (text.length > 14 ? '…' : '');
-    $('#chatTitle').textContent = text.slice(0, 24) + (text.length > 24 ? '…' : '');
+    $('#topProjectChip').textContent = existing ? session.title : text.slice(0, 14) + (text.length > 14 ? '…' : '');
+    $('#chatTitle').textContent = existing ? session.title : text.slice(0, 24) + (text.length > 24 ? '…' : '');
 
     var aiMsg = addMsg('ai', '<span class="typing"><span></span><span></span><span></span></span>');
     var textEl = aiMsg.querySelector('.msg-text');
     var started = false;
+    var taskStarted = false;
 
     var cfgBlock = '[求解配置] 赛题模板：' + cfg.template + '；参赛组别：' + cfg.group + '；论文语言：' + cfg.lang +
       (cfg.team ? '；队伍号：' + cfg.team : '') + '；求解模型：' + cfg.model +
       (cfg.outDir ? '；论文生成路径：' + cfg.outDir : '') +
       '。请严格按以上配置执行本次求解与论文写作。';
     // 演示流程不写真实目录：阶段解说里去掉 outDir，避免误导为已落盘
-    var reqCfg = isDemo ? Object.assign({}, cfg, { outDir: '' }) : cfg;
-    currentTaskId = (isDemo ? bridge.submitDemo : bridge.submit)({ prompt: text + '\n\n' + cfgBlock, mode: modes[modeIdx], attachments: attNames, attachmentPaths: attPaths, attachmentKinds: attachmentKinds, config: reqCfg }, function (ev) {
-      if (ev.type === 'stage') {
-        started = true;
+    var reqCfg = Object.assign({}, cfg, isDemo ? { outDir: '' } : {});
+    if (modifying) {
+      cfgBlock = '[修改配置] 论文语言：' + cfg.lang + '。只修改用户指定内容，保留其余已有结果；论文语言适用于正文、摘要和图表，不要求对话改用该语言。';
+      if (modeIdx === 1) cfgBlock += ' 本次范围仅论文内容与排版；不修改原始数据、求解代码或模型计算结果，若必须改动这些内容请先说明并停止。';
+      if (modeIdx === 2) cfgBlock += ' 只重做用户明确指定的小问及其关联论文章节；未指明小问时先询问，不自行扩大到整题。';
+    }
+    currentTaskId = (isDemo ? bridge.submitDemo : bridge.submit)({ prompt: text + '\n\n' + cfgBlock, mode: modes[modeIdx], projectPath: existing ? session.path : (reusePrepared ? session.preparedPath : ''), modifyMode: modifying, resumeExisting: resumeExisting, reusePrepared: reusePrepared, recentChat: recentChat, attachments: attNames, attachmentPaths: attPaths, attachmentKinds: attachmentKinds, config: reqCfg }, function (ev) {
+      if (ev.artifactWarning) { addMsg('ai', esc(ev.artifactWarning)); }
+      if (ev.languageCheck) { addMsg('ai', esc(ev.languageCheck)); }
+      if (ev.type === 'prepared' || ev.type === 'started') {
+        if (!isDemo && ev.projectPath) {
+          session.path = ev.projectPath;
+          if (ev.type === 'started') {
+            taskStarted = true; session.real = true; session.preparedPath = null;
+            session.id = sessionIdForPath(ev.projectPath);
+            activeSessionId = session.id;
+          } else {
+            session.real = false; session.preparedPath = ev.projectPath;
+          }
+          session.lang = reqCfg.lang;
+          session.badge = ev.type === 'started' ? (modifying ? '修改中' : '求解中') : '准备中';
+          renderSessions(); renderRecent(); syncSend();
+          if (ev.type === 'started') saveSessionView(session, true);
+        }
+      } else if (ev.type === 'protected') {
+        session.revision = ev.revision;
+        toast('已保存修改前版本，可在「版本与改动」核对或恢复', { icon: 'check' });
+      } else if (ev.type === 'stage') {
+        if (!started) {
+          textEl.innerHTML = '<div class="agent-stage"></div><div class="agent-stream"></div>';
+          started = true;
+        }
         showStageBar(ev.index);
         var step = '<div class="stage-step active"><span class="step-ico">' + (ev.index + 1) + '</span>' +
           '<div><strong>' + esc(ev.label) + '</strong></div>' +
           '<span class="step-desc">' + esc(bridge.STAGES[ev.index].desc) + '</span></div>';
-        textEl.innerHTML = step + (ev.text ? '<p>' + esc(ev.text) + '</p>' : '');
+        textEl.querySelector('.agent-stage').innerHTML = step;
+        if (ev.text) textEl.querySelector('.agent-stream').appendChild(document.createTextNode(ev.text + '\n'));
       } else if (ev.type === 'text') {
         // 流式追加用 Text 节点：天然免转义，且不再每帧重建整段 innerHTML
-        if (!started) { textEl.innerHTML = '<div class="agent-stream"></div>'; started = true; }
+        if (!started) { textEl.innerHTML = '<div class="agent-stage"></div><div class="agent-stream"></div>'; started = true; }
         var streamEl = textEl.querySelector('.agent-stream');
         if (streamEl) streamEl.appendChild(document.createTextNode(ev.text));
+        scheduleChatSave();
         $('#chatFlow').scrollTop = $('#chatFlow').scrollHeight;
+      } else if (ev.type === 'settling') {
+        $('#chatStatus').textContent = '收尾未确认';
+        toast(ev.text, { icon: 'info' });
       } else if (ev.type === 'error') {
-        textEl.innerHTML += '<p style="color:var(--err)"><strong>出错：</strong>' + esc(String(ev.text)) + '</p>';
+        textEl.innerHTML += '<p style="color:var(--err)"><strong>未完成：</strong>' + esc(String(ev.text)) + '</p>';
+        if (!isDemo) {
+          session.run = false;
+          if (!taskStarted && session.preparedPath) {
+            session.real = false; session.badge = '启动失败';
+            uploads = { problem: attachedFiles.filter(function (a) { return a.kind === 'problem'; }),
+              data: attachedFiles.filter(function (a) { return a.kind === 'data'; }) };
+            renderAttachments();
+          } else {
+            session.badge = ev.result && ev.result.qualityGate ? '待补齐' : '失败';
+          }
+          session.result = ev.result || {};
+          if (ev.artifacts) { session.artifacts = ev.artifacts; renderOutputs(ev.artifacts, false); }
+        }
         finish();
       } else if (ev.type === 'done') {
         var demo = isDemo || ev.demo;
         var arts = (ev.artifacts && ev.artifacts.length) ? ev.artifacts : [];
         textEl.innerHTML += demo
           ? '<p><strong style="color:var(--ok);display:inline-flex;align-items:center;gap:5px;vertical-align:middle">' + svg('check', 14) + ' 演示完成</strong>　以上为样例求解流程，右侧「产出文件」为演示清单：未生成真实文件，也未调用任何模型。</p>'
-          : '<p><strong style="color:var(--ok);display:inline-flex;align-items:center;gap:5px;vertical-align:middle">' + svg('check', 14) + ' 已完成</strong>　' + (arts.length ? '产出文件已按实际生成列于右侧「产出文件」（点击可打开）。' : '未扫描到产出文件，请点「打开工作目录」核实。') + '</p>';
+          : '<p><strong style="color:var(--ok);display:inline-flex;align-items:center;gap:5px;vertical-align:middle">' + svg('check', 14) + ' 执行结束</strong>　' + (arts.length ? '产出文件已按实际生成列于右侧「产出文件」（点击可打开）。' : '未扫描到产出文件，请点「打开工作目录」核实。') + '</p>';
+        if (!demo) {
+          var result = ev.result || {};
+          textEl.innerHTML += '<p><strong>结果待人工核查</strong>：执行结束不代表论文可直接提交。质量状态：' + esc(result.qualityStatus || 'UNKNOWN') +
+            '；科学验证：' + esc(result.scientificValidationStatus || 'UNKNOWN') + '。请核对题目覆盖、数据与结论，以及全文语言。</p>';
+          session.result = result; session.artifacts = arts;
+          session.badge = '执行结束·待核查'; session.run = false;
+        }
         renderOutputs(arts, demo);
         finish(true);
         if (cfg.autoOpen) {
@@ -434,6 +1038,11 @@
   }
 
   function finish(completed) {
+    var session = selectedSession();
+    if (session && session.local) {
+      if (session.run) session.badge = completed ? '执行完成' : '已停止';
+      session.run = false; saveSessionView(undefined, true); renderSessions(); renderRecent();
+    }
     running = false;
     demoTask = false;
     $('#btnSend').hidden = false; $('#btnStop').hidden = true;
@@ -454,7 +1063,11 @@
     Promise.resolve(id ? bridge.abort(id) : null).then(function () {
       stopping = false; currentTaskId = null;
       toast('已停止当前任务', { icon: 'info' }); finish();
-    }).catch(function () { stopping = false; currentTaskId = null; finish(); });
+    }).catch(function (e) {
+      stopping = false; running = true; syncSend();
+      $('#chatStatus').textContent = '停止未确认';
+      toast((e && e.message) || '停止未确认，请重试停止，不要启动新任务', { icon: 'info' });
+    });
   });
   $('#chatInput').addEventListener('input', syncSend);
   $('#chatInput').addEventListener('keydown', function (e) {
@@ -465,6 +1078,10 @@
   // 新任务：用模板克隆，重置 display，避免旧节点 display:none 被复制
   var welcomeTemplate = $('#welcomeState').cloneNode(true);
   $('#btnNewTask').addEventListener('click', function () {
+    if (busy()) { toast('请先停止当前任务，再新建任务', { icon: 'info' }); return; }
+    saveSessionView(undefined, true); activeSessionId = null;
+    uploads = { problem: [], data: [] }; renderAttachments();
+    $('#chatInput').value = ''; renderSessions(); syncSend();
     var flow = $('#chatFlow');
     flow.innerHTML = '';
     var fresh = welcomeTemplate.cloneNode(true);
@@ -475,17 +1092,116 @@
     $('#topProjectChip').textContent = '未选择项目';
     bindQuickCards(); $('#chatInput').focus();
   });
+  $('#btnTaskResume').addEventListener('click', function () {
+    var s = selectedSession();
+    if (busy() || !s || !s.real || !s.path) return;
+    if (!window.confirm('将在原项目继续未完成部分，先备份当前文件。恢复模型会话若不可用，将依据项目文件重建上下文；本次会继续消耗模型额度。是否继续？\n\n' + s.path)) return;
+    var text = $('#chatInput').value.trim() || '请检查原任务状态和已有成果，只继续未完成部分，不重跑已完成内容；先说明当前缺口再继续。';
+    pending = true; syncSend();
+    preflight().then(function (ok) { pending = false; if (ok && !appClosing) startSend(text, true); else syncSend(); })
+      .catch(function () { pending = false; syncSend(); });
+  });
+  $('#btnTaskEditor').addEventListener('click', function () {
+    var s = selectedSession();
+    if (!busy() && s && s.real) openTaskInEditor(s);
+  });
+  $('#btnCloseRevisions').addEventListener('click', function () { $('#revisionDialog').close(); });
+  function showRevisionChanges(changes) {
+    var d = changes || {};
+    $('#revisionChanges').textContent = ['新增（恢复时撤销）：\n' + (d.added || []).join('\n'),
+      '已修改：\n' + (d.modified || []).join('\n'), '已删除（恢复时找回）：\n' + (d.deleted || []).join('\n')].join('\n\n');
+  }
+  $('#btnTaskVersions').addEventListener('click', function () {
+    var s = selectedSession(), api = window.electronAPI;
+    if (busy() || !s || !s.real) return;
+    if (!api || !api.averisListRevisions) { toast('当前内核尚未提供版本保护接口，请使用更新后的客户端', { icon: 'info' }); return; }
+    var panel = $('#revisionDialog');
+    $('#revisionSafetyNotice').textContent = '恢复期间请关闭其他编辑器、同步工具和写入进程，避免外部改写。文件系统恢复不是事务级保证；检测到并发变化时可能拒绝恢复或无法安全回滚。恢复前会先保存安全版本，失败时请按错误提示核对。';
+    $('#revisionList').textContent = '正在读取本项目版本…'; $('#revisionChanges').textContent = '';
+    panel.showModal(); pending = true; syncSend();
+    Promise.resolve().then(function () { return api.averisListRevisions(s.path); }).then(function (r) {
+      if (!r || !r.success) throw new Error((r && r.error) || '读取版本失败');
+      var list = Array.isArray(r.revisions) ? r.revisions : [];
+      $('#revisionList').innerHTML = list.length ? list.map(function (v, i) {
+        return '<div class="revision-row"><span>' + esc(v.createdAt + ' · ' + (v.reason || '项目快照') + ' · ' + v.fileCount + ' 个文件') +
+          '</span><button class="ghost-btn" data-revision="' + i + '" data-action="diff">查看改动</button><button class="ghost-btn" data-revision="' + i + '" data-action="restore">恢复此版本</button></div>';
+      }).join('') : '<p>暂无备份版本。此后每次续改前会自动备份；旧成果不会被追溯伪造为历史版本。</p>';
+      $$('#revisionList button').forEach(function (button) {
+        button.addEventListener('click', function () {
+          if (busy()) return;
+          var v = list[Number(button.dataset.revision)], restore = button.dataset.action === 'restore', reactivating = false;
+          pending = true; syncSend();
+          Promise.resolve().then(function () {
+            if (!restore) return api.averisRevisionDiff(s.path, v.id);
+            return Promise.all([prepareRevisionRestore(s), prepareEditorRestore(s.path)])
+              .then(function () { return api.averisRestoreRevision(s.path, v.id); });
+          }).then(function (response) {
+            if (response && response.cancelled) return;
+            if (!response || !response.success) throw new Error((response && response.error) || '版本操作失败');
+            if (restore) {
+              edResetAfterRestore(s.path);
+              resetSessionAfterRevisionRestore(s);
+              panel.close(); toast('已恢复；恢复前的内容已另存为一个版本', { icon: 'check' });
+              $('#chatFlow').innerHTML = ''; s.lang = null;
+              reactivating = true; pending = false; activateSession(s.id);
+            } else showRevisionChanges(response.changes);
+          }).catch(function (e) { $('#revisionChanges').textContent = e.message || String(e); })
+            .finally(function () { if (!reactivating) { pending = false; syncSend(); } });
+        });
+      });
+    }).catch(function (e) { $('#revisionList').textContent = e.message || String(e); })
+      .finally(function () { pending = false; syncSend(); });
+  });
+
   $('#btnOpenFolder').addEventListener('click', function () {
-    if (live && cfg.outDir) {
-      try { window.electronAPI.openInFinder(cfg.outDir); return; } catch (e) {}
+    var s = selectedSession();
+    var folder = s && s.path || cfg.outDir;
+    if (live && folder) {
+      try { window.electronAPI.openInFinder(folder); return; } catch (e) {}
     }
     toast('论文生成目录：' + (cfg.outDir || '默认工作区（可在「求解配置」中修改）'), { icon: 'folder' });
   });
 
   function bindQuickCards() {
     $$('.quick-card').forEach(function (c) {
-      c.addEventListener('click', function () { send(c.dataset.prompt); });
+      c.addEventListener('click', function () { quickStart(c.dataset.action); });
     });
+  }
+  // 快捷卡只做「准备动作」，绝不直接发送：避免空附件/错会话的误提交。
+  //   卡片1 → 打开赛题选择；卡片2/3 → 需要已有真实项目，并预设对应任务模式。
+  function quickStart(action) {
+    if (busy()) { toast('请先停止当前任务，再开始新的操作', { icon: 'info' }); return; }
+    if (action === 'attach-problem') {
+      var picker = $('#problemInput');
+      if (picker) picker.click();
+      $('#chatInput').focus();
+      toast('选择赛题文件后点发送即可求解；也可以直接把题面粘贴到输入框', { icon: 'info' });
+      return;
+    }
+    var s = selectedSession();
+    if (!s || !s.real || !s.path) {
+      // 欢迎页的「修改论文 / 重做某一问」默认指向最近的真实项目；不自动发送，用户仍可核对。
+      s = sessions.filter(function (x) { return x.real && x.path; })[0];
+      if (!s) { toast('还没有可修改的项目：先上传赛题并完成一次求解', { icon: 'info' }); return; }
+      var activation = activateSession(s.id);
+      if (activeSessionId !== s.id) return;   // 激活被忙状态拒绝时不要继续改模式
+      // 等历史加载完成再改模式：避免把欢迎页/临时提示当成对话写回磁盘
+      Promise.resolve(activation).then(function () { applyQuickMode(s, action); });
+      return;
+    }
+    applyQuickMode(s, action);
+  }
+  function applyQuickMode(s, action) {
+    if (!s || activeSessionId !== s.id || busy()) return;
+    modeIdx = action === 'paper' ? 1 : 2;
+    s.mode = modes[modeIdx];
+    $('#modeLabel').textContent = modes[modeIdx];
+    saveSessionView(s, true); renderSessions();
+    $('#chatInput').value = action === 'paper'
+      ? '请把论文的结果部分补充验证，并检查论文中的数值是否与结果文件一致；只改论文与排版，不动求解代码和原始数据。'
+      : '请重新审视问题二的模型，给出更稳妥的求解方案并重做对应图表；只重做我指定的小问。';
+    syncSend(); $('#chatInput').focus();
+    toast('已选择《' + s.title + '》并切换为「' + modes[modeIdx] + '」，确认后发送', { icon: 'check' });
   }
   bindQuickCards();
 
@@ -611,7 +1327,9 @@
   }
   function edRefreshTree() {
     if (!edLive) { edRenderTree(); return Promise.resolve(); }
-    return window.electronAPI.writeGetFileTree(edProject.path).then(function (r) {
+    var project = edProject;
+    return window.electronAPI.writeGetFileTree(project.path).then(function (r) {
+      if (edProject !== project) return;
       if (!r || !r.success || !r.tree) { edLog('文件树读取失败：' + ((r && r.error) || '未知错误'), 'lg-err'); return; }
       edNodes = []; edFlatten(r.tree, '', edNodes);
       edRenderTree();
@@ -625,10 +1343,10 @@
     clearTimeout(edEditTimer);
     edEditTimer = setTimeout(function () { edGutter(); edOutline(); }, 120);
   }
-  var edOpenSeq = 0;
+  var edOpenSeq = 0, edSavePending = 0, edSavePromise = null;
   function edOpen(n, jumpLine) {
     if (edLive && /\.(docx|xlsx|xls|pdf|png|jpe?g|gif|zip|exe)$/i.test(n.name)) { toast('二进制文件不在代码编辑器中打开：' + n.rel, { icon: 'info' }); return; }
-    if (edDirty && edActive) edSave(true);
+    if (edDirty || edSavePending) { toast('请先保存当前修改并等待保存完成，再切换文件', { icon: 'info' }); return; }
     var seq = ++edOpenSeq;
     edActive = n; edDirty = false; edUndoStack = []; edRedoStack = []; edLastPushTs = 0; edSyncDirty();
     function fill(content) {
@@ -654,20 +1372,44 @@
     if (!node) { if (!silent) toast('先打开一个文件再保存', { icon: 'info' }); return Promise.resolve(false); }
     var val = $('#editorText').value;
     edLastPushTs = 0;      // 保存强制结束 undo 合批
-    if (edLive) {
-      return window.electronAPI.writeFileContent(node.path, val).then(function (r) {
-        if (!r || !r.success) { toast('保存失败：' + ((r && r.error) || '未知错误'), { icon: 'info' }); edLog('保存失败：' + ((r && r.error) || ''), 'lg-err'); return false; }
-        if (edActive === node) { edDirty = false; edPathLabel(); edSyncDirty(); }
-        edLog('已保存 ' + node.rel);
-        if (!silent) toast('已保存到磁盘：' + node.rel, { icon: 'check' });
-        return true;
-      }).catch(function (e) { toast('保存异常：' + e.message, { icon: 'info' }); edLog('保存异常：' + e.message, 'lg-err'); return false; });
-    }
+    var run = function () { return window.electronAPI.writeFileContent(node.path, val); };
+    var request = edSavePending++ ? Promise.resolve(edSavePromise).then(run) : Promise.resolve().then(run);
+    var operation = request.then(function (r) {
+      if (!r || !r.success) { toast('保存失败：' + ((r && r.error) || '未知错误'), { icon: 'info' }); edLog('保存失败：' + ((r && r.error) || ''), 'lg-err'); return false; }
+      if (edActive === node && $('#editorText').value === val) { edDirty = false; edPathLabel(); edSyncDirty(); }
+      edLog('已保存 ' + node.rel);
+      if (!silent) toast('已保存到磁盘：' + node.rel, { icon: 'check' });
+      return true;
+    }).catch(function (e) { toast('保存异常：' + e.message, { icon: 'info' }); edLog('保存异常：' + e.message, 'lg-err'); return false; }).finally(function () {
+      edSavePending--;
+      if (!edSavePending && edSavePromise === operation) edSavePromise = null;
+    });
+    edSavePromise = operation;
+    return operation;
     edDemo[node.rel] = val;
     try { localStorage.setItem('averis.ed.draft.' + node.rel, val); } catch (e) {}
     if (edActive === node) { edDirty = false; edPathLabel(); }
     if (!silent) toast('演示保存：已写入浏览器本地（exe 中为真实磁盘保存）', { icon: 'check' });
     return Promise.resolve(true);
+  }
+  function sameEditorProject(projectPath) {
+    var norm = function (p) { return String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase(); };
+    return !!edProject && norm(edProject.path) === norm(projectPath);
+  }
+  function prepareEditorRestore(projectPath) {
+    if (!sameEditorProject(projectPath)) return Promise.resolve();
+    if (!edSavePending) return edDirty ? Promise.reject(new Error('编辑器有未保存的修改，请先保存后再恢复版本')) : Promise.resolve();
+    return Promise.resolve(edSavePromise).then(function (r) {
+      if (r !== true) throw new Error('编辑器保存尚未成功，请重试保存后再恢复版本');
+      if (edDirty || edSavePending) throw new Error('编辑器仍有修改或保存未完成，请稍后再恢复');
+    });
+  }
+  function edResetAfterRestore(projectPath) {
+    if (!sameEditorProject(projectPath)) return;
+    edOpenSeq++; edActive = null; edPdf = ''; edNodes = []; edProject = null;
+    edDirty = false; edUndoStack = []; edRedoStack = []; edLastVal = '';
+    $('#editorText').value = ''; $('#edCode').hidden = true; $('#edEmpty').hidden = false;
+    edRenderTree(); edRenderPdf(); edSyncDirty();
   }
   function edInsert(before, after, ph) {
     var ta = $('#editorText'); if (!edActive) { toast('先打开一个文件', { icon: 'info' }); return; }
@@ -795,6 +1537,30 @@
       toast('演示新建：' + rel + '（内存样例）', { icon: 'check' });
     }
   }
+  function edAttachProject(p) {
+    if (edDirty) { toast('请先保存当前编辑内容，再切换项目', { icon: 'info' }); return; }
+    edOpenSeq++; edActive = null; edPdf = null; edNodes = [];
+    $('#editorText').value = ''; $('#edCode').hidden = true; $('#edEmpty').hidden = false;
+    edRenderTree(); edRenderPdf();
+    edProject = p; edLog('打开写作项目：' + p.name, 'lg-ok');
+    edRefreshTree().then(function () {
+      if (edProject !== p) return;
+      var node = null;
+      if (p.texFile) {
+        var rel = p.texFile.replace(/\\/g, '/');
+        node = { rel: rel, path: p.path + '\\' + p.texFile, name: rel.split('/').pop(), type: 'tex', dir: rel.indexOf('/') >= 0 ? rel.slice(0, rel.lastIndexOf('/')) : '' };
+      } else {
+        // 同步来的项目可能只有 论文/ 章节而无根主文件：按优先级挑一个 .tex 打开
+        var pref = ['论文/论文.tex', '论文/main.tex', '论文.tex', 'main.tex'];
+        for (var i = 0; i < pref.length && !node; i++) node = edNodes.filter(function (x) { return x.rel === pref[i]; })[0] || null;
+        if (!node) node = edNodes.filter(function (x) { return x.type === 'tex'; })[0] || null;
+        if (node) edLog('项目根目录无主 .tex，已打开 ' + node.rel + '（章节文件单独编译可能缺少导言区）');
+        else edLog('项目内没有 .tex 文件：点「＋ 新建」创建第一个文件');
+      }
+      if (node) edOpen(node);
+      if (p.pdfFile) { edPdf = p.path + '\\' + p.pdfFile; edRenderPdf(); }
+    });
+  }
   function edInit() {
     if (edInited) return; edInited = true;
     edLive = bridge.isLive();
@@ -882,32 +1648,15 @@
         edLog('系统 LaTeX：' + (d && d.success ? d.path : '未检测到') + ' · 编译使用内置 TinyTeX（编译时按需校验引擎）');
       }).catch(function () { edLog('系统 LaTeX 检测跳过 · 编译使用内置 TinyTeX（编译时按需校验引擎）'); });
       window.electronAPI.writeListProjects().then(function (r) {
+        if (edProject) return; // 已从会话历史手动打开项目，不再自动覆盖
         var ps = (r && r.projects) || [];
-        var ready = function (p) {
-          edProject = p; edLog('打开写作项目：' + p.name, 'lg-ok');
-          edRefreshTree().then(function () {
-            var node = null;
-            if (p.texFile) {
-              var rel = p.texFile.replace(/\\/g, '/');
-              node = { rel: rel, path: p.path + '\\' + p.texFile, name: rel.split('/').pop(), type: 'tex', dir: rel.indexOf('/') >= 0 ? rel.slice(0, rel.lastIndexOf('/')) : '' };
-            } else {
-              // 同步来的项目可能只有 论文/ 章节而无根主文件：按优先级挑一个 .tex 打开
-              var pref = ['论文.tex', 'main.tex', '论文/论文.tex', '论文/main.tex'];
-              for (var i = 0; i < pref.length && !node; i++) node = edNodes.filter(function (x) { return x.rel === pref[i]; })[0] || null;
-              if (!node) node = edNodes.filter(function (x) { return x.type === 'tex'; })[0] || null;
-              if (node) edLog('项目根目录无主 .tex，已打开 ' + node.rel + '（章节文件单独编译可能缺少导言区）');
-              else edLog('项目内没有 .tex 文件：点「＋ 新建」创建第一个文件');
-            }
-            if (node) edOpen(node);
-            if (p.pdfFile) { edPdf = p.path + '\\' + p.pdfFile; edRenderPdf(); }
-          });
-        };
-        if (ps.length) { ready(ps[0]); return; }
+        if (ps.length) { edAttachProject(ps[0]); return; }
         window.electronAPI.writeCreateProject('Averis 示例论文').then(function (c) {
           if (!c || !c.success) { edLog('创建示例项目失败：' + ((c && c.error) || ''), 'lg-err'); edSetStatus('err', '失败'); return; }
           window.electronAPI.writeListProjects().then(function (r2) {
+            if (edProject) return;
             var ps2 = (r2 && r2.projects) || [];
-            if (ps2.length) ready(ps2[0]); else edLog('写作项目列表为空', 'lg-err');
+            if (ps2.length) edAttachProject(ps2[0]); else edLog('写作项目列表为空', 'lg-err');
           });
         });
       });
@@ -922,17 +1671,9 @@
       edRenderTree(); edOpen(edNodes[0]);
       edRenderPdf();
     }
-    // 关窗守卫：live 走内核 paperDirty 链（自动保存成功才放行），浏览器 demo 用 beforeunload
+    // 关窗守卫：live 由全局监听器统一刷新对话与编辑器；浏览器 demo 仅保护编辑器草稿。
     if (edLive) {
       try { window.electronAPI.setPaperDirty(false); } catch (e) {}   // 复位崩溃重载后的残留 dirty
-      if (typeof window.electronAPI.onAppCloseRequest === 'function') {
-        window.electronAPI.onAppCloseRequest(function () {
-          edSave(true).then(function (ok) {
-            if (ok !== false) { try { window.electronAPI.setPaperDirty(false); window.electronAPI.forceCloseApp(); } catch (e) {} }
-            else toast('自动保存失败：请手动保存后再关闭', { icon: 'info' });
-          });
-        });
-      }
     } else {
       window.addEventListener('beforeunload', function (e) { if (edDirty) { e.preventDefault(); e.returnValue = ''; } });
     }
@@ -940,6 +1681,12 @@
     var pvT = $('#edPreviewToggle');
     if (pvT) pvT.addEventListener('click', function () { $('#view-editor').classList.toggle('preview-open'); });
     $$('.ed-tb-btn[title]').forEach(function (b) { b.setAttribute('aria-label', b.title); });
+  }
+
+  // 不依赖编辑器是否初始化：主进程每次正常关闭都先交给渲染层排空保存。
+  if (window.electronAPI && typeof window.electronAPI.onAppCloseRequest === 'function') {
+    try { window.electronAPI.setChatDirty(false); } catch (e) {}   // 渲染层重载后，内存脏状态已不可恢复
+    window.electronAPI.onAppCloseRequest(prepareAppClose);
   }
 
   // ---------- 我的 ----------
@@ -967,30 +1714,79 @@
     });
     paintMe(stats, bars, '<span>近 7 天合计 <strong>3.2M token</strong>（演示）</span><span>估算费用 <strong>¥ 12.40</strong>（演示）</span>', true);
   }
+  function renderMeUnknown() {
+    var labels = ['累计任务', '求解完成率', '累计 Token', '活跃天数'];
+    var icons = ['spark', 'target', 'coin', 'cal'];
+    paintMe(labels.map(function (label, i) { return { num: '—', label: label, sub: '暂无法读取', icon: icons[i] }; }), [],
+      '<span>无法读取本地用量，当前数值未知；请稍后重新打开此页。</span><span>费用以服务商账单为准</span>', false);
+  }
   // 桌面端：读取内核真实用量统计（get-usage-stats）
   function renderMeReal() {
-    if (!(bridge.isLive() && window.electronAPI && typeof window.electronAPI.getUsageStats === 'function')) { renderMeDemo(); return; }
-    Promise.resolve(window.electronAPI.getUsageStats()).then(function (r) {
-      if (!r || !r.success) { renderMeDemo(); return; }
-      var totals = r.totals || {}, trend = r.trend || [], daily = r.daily || {}, tasks = r.tasks || [];
-      var terminal = tasks.filter(function (t) { return t.status === 'completed' || t.status === 'failed' || t.status === 'interrupted' || t.status === 'cancelled'; });
-      var okN = tasks.filter(function (t) { return t.status === 'completed'; }).length;
+    if (!bridge.isLive()) { renderMeDemo(); return; }
+    if (!(window.electronAPI && typeof window.electronAPI.getUsageStats === 'function')) { renderMeUnknown(); return; }
+    return Promise.resolve().then(function () { return window.electronAPI.getUsageStats(); }).then(function (r) {
+      if (!r || r.success !== true) { renderMeUnknown(); return; }
+      var totals = r.totals, trend = r.trend, daily = r.daily, tasks = r.tasks;
+      var validCount = function (n) { return typeof n === 'number' && Number.isSafeInteger(n) && n >= 0; };
+      var validDate = function (value) {
+        if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+        var ms = Date.parse(value + 'T00:00:00Z');
+        return Number.isFinite(ms) && new Date(ms).toISOString().slice(0, 10) === value;
+      };
+      var sumCounts = function (values) {
+        var sum = 0;
+        for (var i = 0; i < values.length; i++) {
+          sum += values[i];
+          if (!validCount(sum)) return null;
+        }
+        return sum;
+      };
+      var validTotals = totals && validCount(totals.input) && validCount(totals.output)
+        && validCount(totals.tasks) && validCount(totals.input + totals.output);
+      var validTrend = Array.isArray(trend) && trend.length === 7 && trend.every(function (d, i) {
+        if (!d || !validDate(d.date) || !validCount(d.input) || !validCount(d.output)
+            || !validCount(d.input + d.output)) return false;
+        for (var j = 0; j < i; j++) if (trend[j].date === d.date) return false;
+        return i === 0 || Date.parse(d.date + 'T00:00:00Z') - Date.parse(trend[i - 1].date + 'T00:00:00Z') === 86400000;
+      });
+      var validDaily = daily && typeof daily === 'object' && !Array.isArray(daily)
+        && Object.keys(daily).every(function (key) {
+          var d = daily[key];
+          return validDate(key) && d && validCount(d.input) && validCount(d.output) && validCount(d.tasks);
+        });
+      var validTasks = Array.isArray(tasks) && tasks.every(function (t) { return t && typeof t.status === 'string'; });
+      if (!validTotals || !validTrend || !validDaily || !validTasks) { renderMeUnknown(); return; }
+      var taskKey = function (t) {
+        var value = typeof t.key === 'string' && t.key ? t.key : t.status.toLowerCase();
+        if (value === 'success' || value === 'succeeded') return 'completed';
+        if (value === 'error') return 'failed';
+        if (value === 'stale') return 'interrupted';
+        if (value === 'canceled' || value === 'stopped') return 'cancelled';
+        return value;
+      };
+      var terminalKeys = ['completed', 'failed', 'interrupted', 'cancelled'];
+      var terminal = tasks.filter(function (t) { return terminalKeys.indexOf(taskKey(t)) >= 0; });
+      var okN = tasks.filter(function (t) { return taskKey(t) === 'completed'; }).length;
       var rate = terminal.length ? Math.round(okN / terminal.length * 100) + '%' : '—';
-      var weekTasks = trend.reduce(function (a, d) { return a + ((daily[d.date] || {}).tasks || 0); }, 0);
+      var weekTasks = sumCounts(trend.map(function (d) {
+        return Object.prototype.hasOwnProperty.call(daily, d.date) ? daily[d.date].tasks : 0;
+      }));
+      var weekTok = sumCounts(trend.map(function (d) { return d.input + d.output; }));
+      if (weekTasks === null || weekTok === null) { renderMeUnknown(); return; }
+      var totalTokens = totals.input + totals.output;
       var stats = [
         { num: String(totals.tasks || 0), label: '累计任务', sub: '近 7 天 +' + weekTasks, icon: 'spark' },
         { num: rate, label: '求解完成率', sub: '最近 ' + terminal.length + ' 条记录', icon: 'target' },
-        { num: fmtTok((totals.input || 0) + (totals.output || 0)), label: '累计 Token', sub: '本地统计', icon: 'coin' },
+        { num: fmtTok(totalTokens), label: '累计 Token', sub: '本地统计', icon: 'coin' },
         { num: String(Object.keys(daily).length), label: '活跃天数', sub: '有用量记录的天数', icon: 'cal' }
       ];
-      var max = Math.max.apply(null, trend.map(function (d) { return (d.input || 0) + (d.output || 0); }).concat([1]));
+      var max = Math.max.apply(null, trend.map(function (d) { return d.input + d.output; }).concat([1]));
       var bars = trend.map(function (d) {
-        var tok = (d.input || 0) + (d.output || 0);
+        var tok = d.input + d.output;
         return { label: d.date.slice(5).replace('-', '/'), v: Math.round(tok / max * 100), tip: fmtTok(tok) + ' token' };
       });
-      var weekTok = trend.reduce(function (a, d) { return a + (d.input || 0) + (d.output || 0); }, 0);
       paintMe(stats, bars, '<span>近 7 天合计 <strong>' + fmtTok(weekTok) + ' token</strong></span><span>本地真实统计</span>', false);
-    }).catch(function () { renderMeDemo(); });
+    }).catch(function () { renderMeUnknown(); });
   }
 
   function renderRecent() {
@@ -998,7 +1794,7 @@
       return '<div class="recent-item" data-id="' + esc(s.id) + '" role="button" tabindex="0"><span class="ri-ico">' + svg(s.icon, 15) + '</span><span class="ri-name">' + esc(s.title) + '</span><span class="ri-meta">' + esc(s.time) + '</span></div>';
     }).join('') : '<div class="session-empty">暂无项目，去工作台新建一个任务</div>';
     $$('#recentProjects .recent-item').forEach(function (el) {
-      function go() { activeSessionId = el.dataset.id; switchView('workbench'); renderSessions(); var s = sessions.find(function (x) { return x.id === el.dataset.id; }); if (s) { $('#chatTitle').textContent = s.title; $('#topProjectChip').textContent = s.title; } }
+      function go() { activateSession(el.dataset.id); }
       el.addEventListener('click', go);
       el.addEventListener('keydown', function (e) { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); go(); } });
     });
@@ -1082,7 +1878,7 @@
     img.onerror = function () { URL.revokeObjectURL(url); toast('图片读取失败，请换一张', { icon: 'info' }); };
     img.src = url;
   });
-  $('#setModel').addEventListener('change', function () { $('#topModelChip').textContent = this.value; ensureOption($('#setApiModel'), this.value); $('#setApiModel').value = this.value; syncApiConfig(); cfg.model = this.value; saveCfg(); renderCfgStrip(); toast('默认模型：' + this.value, { icon: 'spark' }); });
+  $('#setModel').addEventListener('change', function () { ensureOption($('#setApiModel'), this.value); $('#setApiModel').value = this.value; syncApiConfig(); cfg.model = this.value; saveCfg(); renderCfgStrip(); toast('默认模型：' + this.value, { icon: 'spark' }); });
   $('#setTemplate').addEventListener('change', function () { cfg.template = this.value; saveCfg(); renderCfgStrip(); fillCfgControls(); applyTemplateLive(this.value); toast('论文模板：' + this.value, { icon: 'file' }); });
 
   // ---------- API 配置 ----------
@@ -1391,8 +2187,8 @@
     $('#setApiProvider').value = pid;
     fillModelSuggestions(providerById(pid));
     syncModelSelect(providerById(pid), savedModel);
-    $('#topModelChip').textContent = savedModel;
     window.AVERIS_API_CONFIG = cfg;
+    renderApiChip();
     if (migratedFrom) {
       try { localStorage.setItem(API_KEY, JSON.stringify(cfg)); } catch (e) {}
       toast('配置中的模型「' + migratedFrom + '」已下线或即将下线，已迁移为「' + savedModel + '」', { icon: 'info' });
@@ -1410,9 +2206,10 @@
     try { localStorage.setItem(API_KEY, JSON.stringify(out)); }
     catch (e) { toast('API 配置保存失败：本机存储不可用或已满（' + e.message + '）', { icon: 'info' }); }
     window.AVERIS_API_CONFIG = out;
-    $('#topModelChip').textContent = out.apiModel;
+    renderApiChip();
     // 求解配置抽屉的模型与 API 模型保持同一概念：API 侧改模型时同步抽屉（启动时亦对齐）
-    if (typeof cfg !== 'undefined' && cfg && cfg.model !== out.apiModel) { cfg.model = out.apiModel; saveCfg(); renderCfgStrip(); }
+    if (typeof cfg !== 'undefined' && cfg && cfg.model !== out.apiModel) { cfg.model = out.apiModel; saveCfg(); fillCfgControls(); }
+    if (typeof cfg !== 'undefined' && cfg) renderCfgStrip();
   }
   $('#setApiProvider').addEventListener('change', function () {
     var p = providerById(this.value);
@@ -1565,21 +2362,53 @@
 
   function baseName(p) { return String(p || '').replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p; }
 
+  // 模型 API 是否可用于真实求解：只有 base + key 同时存在才算就绪。
+  //   本机后端代理是有意留空配置的场景，由首次启动对话框的「仍然启动」放行。
+  function apiConfigured() {
+    var c = window.AVERIS_API_CONFIG || {};
+    return !!(c.apiBase && c.apiKey);
+  }
+  function renderApiChip() {
+    var chip = $('#topModelChip');
+    if (!chip) return;
+    var ready = apiConfigured();
+    chip.textContent = ready ? ((window.AVERIS_API_CONFIG && window.AVERIS_API_CONFIG.apiModel) || 'deepseek-flash') : '未配置 API';
+    if (chip.classList) chip.classList.toggle('warn', !ready);
+    chip.title = ready ? '当前模型（点击修改 API 配置）' : '尚未配置模型 API，点击去配置';
+    chip.setAttribute('role', 'button');
+    chip.setAttribute('tabindex', '0');
+  }
+  function openApiSettings() {
+    switchView('me');
+    var key = $('#setApiKey');
+    if (key) {
+      try { key.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) {}
+      setTimeout(function () { try { key.focus({ preventScroll: true }); } catch (e) {} }, 120);
+    }
+    toast('真实求解需要模型 API：选择服务商预设并粘贴 API Key，保存后回到工作台发送', { icon: 'info' });
+  }
+
   function renderCfgStrip() {
+    var ready = apiConfigured();
     var items = [
       { icon: 'file', label: '模板', value: cfg.template },
       { icon: 'users', label: '组别', value: cfg.group },
       { icon: 'globe', label: '语言', value: cfg.lang },
       { icon: 'hash', label: '队伍号', value: cfg.team || '未填写', missing: !cfg.team },
-      { icon: 'cpu', label: '模型', value: cfg.model, cls: 'hide-sm' },
+      { icon: 'cpu', label: '模型', value: ready ? cfg.model : '未配置 API', missing: !ready, cls: 'hide-sm', key: 'model' },
       { icon: 'folder', label: '输出', value: cfg.outDir ? baseName(cfg.outDir) : '默认目录', cls: 'hide-sm' }
     ];
     $('#configStrip').innerHTML = '<span class="strip-lead">' + svg('sliders', 13) + ' 求解配置</span>' +
       items.map(function (it) {
-        return '<button type="button" class="cfg-chip' + (it.missing ? ' missing' : '') + (it.cls ? ' ' + it.cls : '') + '" title="' + esc(it.label + '：' + it.value + '（点击修改）') + '">' +
+        return '<button type="button" class="cfg-chip' + (it.missing ? ' missing' : '') + (it.cls ? ' ' + it.cls : '') + '"' + (it.key ? ' data-key="' + it.key + '"' : '') + ' title="' + esc(it.label + '：' + it.value + '（点击修改）') + '">' +
           svg(it.icon, 12) + '<span>' + esc(it.label) + '</span><b>' + esc(it.value) + '</b></button>';
       }).join('');
-    $$('#configStrip .cfg-chip').forEach(function (chip) { chip.addEventListener('click', openCfg); });
+    $$('#configStrip .cfg-chip').forEach(function (chip) {
+      chip.addEventListener('click', function () {
+        if (chip.dataset.key === 'model' && !apiConfigured()) { openApiSettings(); return; }
+        openCfg();
+      });
+    });
   }
 
   function collectModels() {
@@ -1666,7 +2495,12 @@
     b.addEventListener('click', function () { cfg.group = b.dataset.val; saveCfg(); segSet('#cfgGroup', cfg.group); renderCfgStrip(); });
   });
   $$('#cfgLang button').forEach(function (b) {
-    b.addEventListener('click', function () { cfg.lang = b.dataset.val; saveCfg(); segSet('#cfgLang', cfg.lang); renderCfgStrip(); });
+    b.addEventListener('click', function () {
+      if (busy()) { toast('任务运行或载入中，请结束后再修改语言', { icon: 'info' }); return; }
+      cfg.lang = b.dataset.val;
+      var s = selectedSession(); if (s && s.real) s.lang = cfg.lang;
+      saveCfg(); segSet('#cfgLang', cfg.lang); renderCfgStrip();
+    });
   });
   $('#cfgTeam').addEventListener('input', function () {
     cfg.team = this.value.trim(); saveCfg(); renderCfgStrip();
@@ -1735,7 +2569,6 @@
     ensureOption($('#setTemplate'), cfg.template); $('#setTemplate').value = cfg.template;
     ensureOption($('#setModel'), cfg.model); $('#setModel').value = cfg.model;
     ensureOption($('#setApiModel'), cfg.model); $('#setApiModel').value = cfg.model;
-    $('#topModelChip').textContent = cfg.model;
     syncApiConfig();
     if (live) { try { Promise.resolve(window.electronAPI.resetSolveOutputRoot()).then(showOutDir).catch(function () {}); } catch (e) {} }
     toast('求解配置已恢复默认', { icon: 'check' });
@@ -1785,18 +2618,80 @@
   }
   renderCfgStrip();
 
+  // ---------- 首次求解：模型就绪检查 ----------
+  // 未配置 base+key 时先不启动任务，给出「去配置 / 先看演示 / 仍然启动」三选一，
+  //   避免工作区建好、题面复制完才发现没有模型可用。仍然启动用于本机后端代理场景。
+  var setupResolver = null;
+  var apiGateAck = false;
+  function apiSetupGate() {
+    if (!live || apiGateAck || apiConfigured()) return Promise.resolve(true);
+    return new Promise(function (resolve) {
+      if (setupResolver) { resolve(false); return; }   // 已有对话框：本次提交直接放弃，避免叠加
+      setupResolver = resolve;
+      var d = $('#setupDialog');
+      if (d && typeof d.showModal === 'function') {
+        try { d.showModal(); } catch (e) { setupResolver = null; resolve(true); }
+      } else {
+        setupResolver = null;
+        resolve(true);   // 无对话框能力（旧壳/自动化）不阻断
+      }
+    });
+  }
+  function settleSetup(ok) {
+    var r = setupResolver; setupResolver = null;
+    var d = $('#setupDialog');
+    try { if (d && d.open) d.close(); } catch (e) {}
+    if (r) r(ok);
+    return !!r;
+  }
+  function startDemo() {
+    if (busy()) { toast('请先停止当前任务，再查看演示', { icon: 'info' }); return; }
+    saveSessionView(undefined, true);
+    demoTask = true;
+    var demo = { id: 'demo-' + Date.now(), title: '例题演示（不接模型）', badge: '演示中',
+      time: '刚刚', icon: 'flask', run: true, local: true, demo: true, mode: modes[modeIdx] };
+    sessions.unshift(demo); activeSessionId = demo.id;
+    renderSessions(); renderRecent(); syncSend();
+    startSend('例题演示：某酯化反应在 343–403 K、0.4–1.6 MPa 区间的饱和蒸气压建模与论文写作，请完整展示读题、建模、求解到论文的全流程。');
+  }
+  $('#setupGoConfig').addEventListener('click', function () { settleSetup(false); openApiSettings(); });
+  $('#setupDemo').addEventListener('click', function () {
+    var had = settleSetup(false);
+    if (had) setTimeout(startDemo, 0);   // 等原提交的 pending 先释放
+  });
+  $('#setupSkip').addEventListener('click', function () {
+    apiGateAck = true; settleSetup(true);
+    toast('已跳过模型配置检查；若端点不可用，任务会在启动阶段报错', { icon: 'info' });
+  });
+  // ESC 关闭对话框 = 放弃本次提交（不清空输入框，配置后可再次发送）
+  $('#setupDialog').addEventListener('cancel', function () {
+    var r = setupResolver; setupResolver = null;
+    if (r) r(false);
+  });
+
   // 求解前环境自检（可在配置中关闭）
   function preflight() {
-    if (!cfg.envCheck || !live || typeof window.electronAPI.checkEnvironment !== 'function') return Promise.resolve(true);
-    return Promise.resolve(window.electronAPI.checkEnvironment()).then(function (r) {
-      var res = (r && r.results) || {};
-      var bad = ['python', 'latex', 'pandoc'].filter(function (k) { return res[k] && res[k].ok === false; });
-      if (bad.length) {
-        toast('环境自检未通过：' + bad.join(' / ') + '，请先修复环境或在求解配置中关闭自检', { icon: 'info' });
+    var gate = !live ? Promise.resolve(true)
+      : (typeof apiSetupGate === 'function' ? apiSetupGate() : Promise.resolve(true));
+    return gate.then(function (ready) {
+      if (!ready) return false;
+      if (!cfg.envCheck) return true;   // 环境自检可关闭，但模型就绪检查仍生效
+      return Promise.resolve().then(function () {
+        if (typeof window.electronAPI.checkEnvironment !== 'function') throw new Error('自检接口不可用');
+        return window.electronAPI.checkEnvironment();
+      }).then(function (r) {
+        var res = (r && r.results) || {};
+        var bad = ['python', 'latex', 'pandoc'].filter(function (k) { return !res[k] || res[k].ok !== true; });
+        if (bad.length) {
+          toast('环境自检未通过：' + bad.join(' / ') + '，请先修复环境或在求解配置中关闭自检', { icon: 'info' });
+          return false;
+        }
+        return true;
+      }).catch(function (e) {
+        toast('环境自检失败，尚未启动任务：' + ((e && e.message) || '无法读取环境状态'), { icon: 'info' });
         return false;
-      }
-      return true;
-    }).catch(function () { return true; });
+      });
+    });
   }
 
   // ---------- 环境自检 ----------

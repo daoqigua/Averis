@@ -9,6 +9,20 @@
              分层背景深度 · 入场/悬停动效 · prefers-reduced-motion
    ============================================================ */
 
+.task-context{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 16px;border-bottom:1px solid var(--line);background:var(--surface-2)}
+.task-context[hidden]{display:none}
+#taskPath{flex:1 1 200px;min-width:0;overflow-wrap:anywhere;font-size:12px;color:var(--text-2)}
+.revision-dialog{width:min(760px,90vw);max-height:80vh;overflow:auto;border:1px solid var(--line);border-radius:12px;padding:20px;background:var(--surface);color:var(--text-1)}
+.revision-dialog::backdrop{background:rgba(0,0,0,.45)}
+.revision-dialog p{color:var(--text-2)}
+.setup-dialog{width:min(560px,92vw)}
+.setup-dialog .setup-note{font-size:12px;color:var(--text-3)}
+.setup-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+.revision-row{display:flex;align-items:center;flex-wrap:wrap;gap:8px;padding:10px 0;border-bottom:1px solid var(--line)}
+.revision-row span{flex:1 1 200px;overflow-wrap:anywhere}
+#revisionChanges{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}
+.agent-stream{white-space:pre-wrap;overflow-wrap:anywhere}
+
 :root{
   /* --- 品牌色（来自 Logo 取色） --- */
   --ink-900:#0B1F45;
@@ -124,6 +138,9 @@ svg{flex-shrink:0;display:block}
 .project-chip{background:var(--surface-3);color:var(--text-2);border:1px solid var(--line)}
 .model-chip{background:var(--brand-100);color:var(--ink-800);font-weight:600}
 .model-chip::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--brand-600);flex-shrink:0}
+.model-chip{cursor:pointer}
+.model-chip.warn{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn-line)}
+.model-chip.warn::before{background:var(--warn)}
 .icon-btn{width:34px;height:34px;display:grid;place-items:center;border-radius:var(--r-sm);color:var(--text-2);transition:background var(--dur) var(--ease),color var(--dur) var(--ease),transform var(--dur) var(--ease)}
 .icon-btn:hover{background:var(--surface-3);color:var(--ink-800)}
 .icon-btn:active{transform:scale(.92)}
@@ -202,8 +219,9 @@ svg{flex-shrink:0;display:block}
 .si-ico{width:30px;height:30px;border-radius:var(--r-sm);background:var(--surface);display:grid;place-items:center;color:var(--brand-600);border:1px solid var(--line);flex-shrink:0}
 .session-item.active .si-ico{border-color:transparent;background:var(--surface);box-shadow:var(--sh-1)}
 .si-body{min-width:0;flex:1}
-.si-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-1)}
+.si-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text-1);padding-right:18px}
 .si-meta{font-size:11.5px;color:var(--text-3);margin-top:5px;display:flex;align-items:center;gap:6px}
+.si-path{font-size:10.5px;line-height:1.5;color:var(--text-3);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:18px}
 .si-badge{font-size:10.5px;padding:2px 8px;border-radius:var(--r-pill);background:var(--ok-bg);color:var(--ok);white-space:nowrap;flex-shrink:0;font-weight:600;border:1px solid var(--ok-line)}
 .si-badge.run{background:var(--run-bg);color:var(--run);border-color:var(--run-line)}
 .si-del{position:absolute;top:8px;right:8px;width:22px;height:22px;border-radius:var(--r-xs);display:grid;place-items:center;color:var(--text-3);opacity:0;transition:opacity var(--dur),background var(--dur),color var(--dur)}
@@ -257,6 +275,7 @@ svg{flex-shrink:0;display:block}
 .msg.user .msg-body{margin-left:auto;background:var(--brand-50);border:1px solid var(--brand-100);padding:11px 15px;border-radius:var(--r-md) var(--r-xs) var(--r-md) var(--r-md);font-size:13px;line-height:1.65}
 .msg.ai .msg-label{font-size:11px;color:var(--text-3);margin-bottom:6px;font-weight:600;letter-spacing:.3px}
 .msg-text{font-size:13px;line-height:1.75;color:var(--text-1)}
+.chat-text-block{white-space:pre-wrap;word-break:break-word}
 .msg-text p{margin-bottom:8px}
 .msg-text strong{color:var(--ink-800)}
 .agent-stream{
@@ -348,6 +367,13 @@ svg{flex-shrink:0;display:block}
 .of-meta{font-size:10px;color:var(--text-3);margin-top:3px}
 .of-dl{opacity:0;color:var(--brand-600);font-size:11px;transition:opacity var(--dur);display:inline-flex;align-items:center;gap:3px;flex-shrink:0}
 .out-file:hover .of-dl{opacity:1}
+.of-actions{display:inline-flex;align-items:center;gap:4px;flex-shrink:0}
+.of-save{opacity:0;border:1px solid var(--line);background:var(--surface);color:var(--brand-600);border-radius:var(--r-sm);width:24px;height:24px;display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:opacity var(--dur),border-color var(--dur)}
+.out-file:hover .of-save,.of-save:focus-visible{opacity:1}
+.of-save:hover{border-color:var(--brand-400)}
+.of-save:disabled{opacity:.4;cursor:default}
+.out-download{font-size:11px;height:26px;padding:0 9px;margin-left:auto;margin-right:6px}
+.out-download[hidden]{display:none}
 
 /* ============ 视图2：编辑器（LaTeX 工作台） ============ */
 .ed-layout{display:flex;gap:10px;padding:10px;width:100%;height:100%;min-height:0}
@@ -567,13 +593,15 @@ svg{flex-shrink:0;display:block}
   .output-panel{position:fixed;top:52px;right:0;bottom:0;z-index:60;box-shadow:var(--sh-3)}
   .brand-sub{display:none}
 }
-@media(max-width:820px){
+@media(max-width:860px){
   .rail{width:58px}.rail-item{width:48px}.rail-item span{display:none}.rail-item.active::before{left:-8px}
   .session-panel{--pw:184px}
   .cfg-chip.hide-sm{display:none}
   .me-stats{grid-template-columns:repeat(2,1fr)}
   .me-grid,.settings-grid{grid-template-columns:1fr}
   .chat-flow,.composer-wrap{padding-left:var(--sp-4);padding-right:var(--sp-4)}
+  .chat-head-right .ghost-btn{padding-left:11px;padding-right:11px}
+  .chat-head-right .pt-badge{right:0}
   .me-hero{flex-wrap:wrap}
   /* 窄屏：预览列改右侧浮层（复用 ≤1180 产出浮层模式），工具栏常驻入口保证 Word/下载任何宽度可达 */
   .ed-preview-col{position:fixed;top:52px;right:0;bottom:0;width:min(420px,92vw);z-index:65;display:none;background:var(--surface-2);border-left:1px solid var(--line);box-shadow:var(--sh-3);padding:8px}
@@ -582,9 +610,22 @@ svg{flex-shrink:0;display:block}
   .ed-side{width:184px}
 }
 @media(max-width:700px){
+  .titlebar{padding-left:var(--sp-3);padding-right:var(--sp-3)}
+  .brand{min-width:0}
+  .titlebar-right{min-width:0;gap:var(--sp-1)}
+  .project-chip,.model-chip{display:none}
+  .chat-head{height:auto;min-height:58px;flex-wrap:wrap;padding:6px var(--sp-3);gap:6px}
+  .chat-head-left{flex:1 1 100%}
+  .chat-head-left h2{flex:1;min-width:0}
+  .chat-head-right{flex:1 1 auto;justify-content:flex-end;flex-wrap:wrap;min-width:0;max-width:100%}
+  .chat-head-right .ghost-btn{padding:6px 8px;font-size:11px;gap:4px}
+  .chat-head-right .pt-badge{right:0}
   .quick-starts{grid-template-columns:1fr}
   .quick-card{flex-direction:row;align-items:center;gap:10px}
   .qc-desc{flex:1}
+  .composer-toolbar .toolbar-left{flex:1;min-width:0;flex-wrap:wrap}
+  .composer-toolbar .toolbar-right{flex-shrink:0;align-self:flex-start}
+  .composer-toolbar .tool-btn{flex-shrink:0;white-space:nowrap}
 }
 
 /* ============ 降低动效偏好 ============ */
