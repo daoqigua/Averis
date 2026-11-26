@@ -571,7 +571,7 @@
     if (busy()) { toast('请先停止当前任务，再切换会话', { icon: 'info' }); return; }
     var s = sessions.find(function (x) { return x.id === id; });
     if (!s) return;
-    saveSessionView(undefined, true); activeSessionId = id;
+    saveSessionView(undefined, true); activeSessionId = id; modeManual = false;
     if (s.real && modes.indexOf(s.mode) >= 0) modeIdx = modes.indexOf(s.mode);
     switchView('workbench');
     $('#chatTitle').textContent = s.title; $('#topProjectChip').textContent = s.title;
@@ -722,16 +722,74 @@
 
   // ---------- 模式切换 ----------
   var modes = ['按要求修改', '只改论文', '重做指定小问']; var modeIdx = 0;
-  $('#btnMode').addEventListener('click', function () {
-    if (busy() || !selectedSession() || !selectedSession().real) return;
+  var modeManual = false; // 用户手动点过模式后，不再被提示词自动改写
+  function classifyPrompt(text) {
+    var t = String(text || '').trim();
+    if (!t) return 'new';
+    var redo = /(重做|重新做|重新算|重算|重新求解|重新建模|重新跑|重跑|换.{0,4}模型|重新出图|重新画|重画)/.test(t);
+    var paperVerb = /(改|修改|调整|补充|完善|替换|更新|修正|核对|检查|润色|统一|删|去掉|加上)/.test(t);
+    var paperTarget = /(论文|摘要|正文|结论|参考文献|附录|致谢|排版|格式|措辞|语言|章节|第[一二三四五六七八九十\d]+(节|章)|图\s*\d|表\s*\d)/.test(t);
+    var modify = /(改|修改|调整|补充|完善|替换|更新|修正|核对|检查|重命名|删除|去掉|加上|增加|减少|统一)/.test(t);
+    var solve = /(求解|建模|做一下|完成|赛题|题目|附件|数据|分析)/.test(t);
+    var projectRef = /(论文|项目|上次|刚才|已有|上面|之前|这个任务|该项目|已保存)/.test(t);
+    if (redo) return 'redo';
+    if (paperTarget && paperVerb) return 'paper';
+    if (solve && !paperTarget && !projectRef && t.length > 60) return 'new';
+    if (modify && !solve) return 'modify';
+    if (modify && t.length <= 160) return 'modify';
+    return solve ? 'new' : 'new';
+  }
+  function intentModeIndex(intent) { return intent === 'paper' ? 1 : (intent === 'redo' ? 2 : (intent === 'modify' ? 0 : -1)); }
+  function latestRealSession() { var list = sessions.filter(function (x) { return x.real && x.path; }); return list.length ? list[0] : null; }
+  function updateIntentChip() {
+    var row = $('#intentRow'), pill = $('#intentPill'), change = $('#intentChange');
+    if (!row || !pill) return;
+    var text = ($('#chatInput').value || '').trim();
+    var s = selectedSession();
+    var selReal = !!(s && s.real && s.path);
+    var intent = classifyPrompt(text);
+    if (busy() || !text || intent === 'new') { row.hidden = true; return; }
+    var target = selReal ? s : latestRealSession();
+    var label = modes[intentModeIndex(intent)];
+    if (!target) {
+      pill.className = 'intent-pill warn';
+      pill.textContent = '还没有可修改的项目：先上传赛题并完成一次求解';
+      if (change) change.hidden = true;
+      row.hidden = false;
+      return;
+    }
+    if (change) change.hidden = false;
+    pill.className = 'intent-pill';
+    pill.textContent = selReal
+      ? ('将按「' + label + '」修改《' + target.title + '》')
+      : ('将自动选中《' + target.title + '》并按「' + label + '」修改');
+    row.hidden = false;
+    if (selReal && !modeManual) {
+      var idx = intentModeIndex(intent);
+      if (idx >= 0 && idx !== modeIdx) {
+        modeIdx = idx; s.mode = modes[modeIdx];
+        $('#modeLabel').textContent = modes[modeIdx];
+      }
+    }
+  }
+  function cycleMode(manual) {
+    if (busy()) return;
     modeIdx = (modeIdx + 1) % modes.length;
+    if (manual) modeManual = true;
     var session = selectedSession();
-    session.mode = modes[modeIdx];
-    $('#modeLabel').textContent = modes[modeIdx];
-    if (session.historyReadFailed) scheduleChatSave();
-    else saveSessionView(session, true);
+    if (session && session.real) {
+      session.mode = modes[modeIdx];
+      $('#modeLabel').textContent = modes[modeIdx];
+      if (session.historyReadFailed) scheduleChatSave();
+      else saveSessionView(session, true);
+    }
+    updateIntentChip();
     toast('任务模式：' + modes[modeIdx], { icon: 'spark' });
-  });
+  }
+  $('#btnMode').addEventListener('click', function () { cycleMode(true); });
+
+  var intentChangeBtn = $('#intentChange');
+  if (intentChangeBtn) intentChangeBtn.addEventListener('click', function () { cycleMode(true); });
 
   // ---------- 输出面板 ----------
   function renderOutputs(list, demo) {
@@ -866,6 +924,7 @@
     $('#btnTaskVersions').disabled = busy() || !real;
     $('#btnMode').disabled = busy() || !real;
     $('#modeLabel').textContent = real ? ((modes && modes[modeIdx]) || '按要求修改') : '新题求解';
+    updateIntentChip();
   }
 
   function send(text, internal) {
@@ -873,6 +932,31 @@
     if (!text || busy()) return;
     var selected = selectedSession();
     var modifying = !!(selected && selected.real && selected.path);
+    var intent = classifyPrompt(text);
+    // 已选真实项目：提示词自动选择修改范围（用户手动点过模式则尊重手动）
+    if (modifying && !modeManual && intent !== 'new') {
+      var autoIdx = intentModeIndex(intent);
+      if (autoIdx >= 0 && autoIdx !== modeIdx) {
+        modeIdx = autoIdx; selected.mode = modes[modeIdx];
+        $('#modeLabel').textContent = modes[modeIdx];
+      }
+    }
+    // 未选项目但明显是修改请求：自动选中最近的真实项目，再按修改模式提交
+    if (!internal && live && !demoTask && !modifying && intent !== 'new') {
+      var target = latestRealSession();
+      if (!target) { toast('还没有可修改的项目：请先上传赛题并完成一次求解', { icon: 'info' }); return; }
+      var savedUploads = uploads;
+      var idx2 = intentModeIndex(intent);
+      modeIdx = idx2 >= 0 ? idx2 : 0;
+      target.mode = modes[modeIdx];
+      modeManual = false;
+      Promise.resolve(activateSession(target.id)).then(function () {
+        if (activeSessionId !== target.id) return;
+        uploads = savedUploads; renderAttachments();
+        send(text, true);
+      }).catch(function (e) { toast('切换项目失败：' + ((e && e.message) || e), { icon: 'info' }); });
+      return;
+    }
     if (!internal && live && !demoTask && !modifying) {
       var _hasProblem = uploads.problem.length > 0;
       if (!_hasProblem && text.replace(/\s/g, '').length < 30) {
@@ -902,6 +986,7 @@
       sessions.unshift(session); activeSessionId = session.id;
     }
     session.mode = modes[modeIdx];
+    modeManual = false;
     var recentChat = modifying ? collectChatMessages().slice(-20) : [];
     if (!isDemo) {
       session.local = true; session.run = true; session.badge = modifying ? '修改中' : '准备中';
@@ -1079,7 +1164,7 @@
   var welcomeTemplate = $('#welcomeState').cloneNode(true);
   $('#btnNewTask').addEventListener('click', function () {
     if (busy()) { toast('请先停止当前任务，再新建任务', { icon: 'info' }); return; }
-    saveSessionView(undefined, true); activeSessionId = null;
+    saveSessionView(undefined, true); activeSessionId = null; modeManual = false;
     uploads = { problem: [], data: [] }; renderAttachments();
     $('#chatInput').value = ''; renderSessions(); syncSend();
     var flow = $('#chatFlow');
@@ -1641,7 +1726,7 @@
       });
     });
     if (edLive) {
-      window.electronAPI.onWordExportLog(function (m) { edLog('[word] ' + m); });
+      if (typeof window.electronAPI.onWordExportLog === 'function') window.electronAPI.onWordExportLog(function (m) { edLog('[word] ' + m); });
       edSetStatus('ready', '就绪');
       edLog('Averis 编辑器就绪 · 本机写作项目模式（真实磁盘文件）', 'lg-ok');
       window.electronAPI.latexDetectSystem().then(function (d) {
@@ -1885,7 +1970,7 @@
   var API_KEY = 'averis.api.config';
   // 主流厂商预设：选厂商 → 自动填 Base/格式/推荐模型，用户只需粘贴 Key
   // models 为各厂商官方在售/仍可调用目录快照（CATALOG_DATE），含简短说明；已下线旧名见 RETIRED_MODELS 迁移表
-  var CATALOG_DATE = '2026-11-18';
+  var CATALOG_DATE = '2026-11-26';
   var PROVIDERS = [
     { id: 'custom', name: '自定义（中转 / 本地网关）', base: '', format: 'auto', models: [], def: '' },
     { id: 'deepseek', name: 'DeepSeek 深度求索', base: 'https://api.deepseek.com/anthropic', format: 'anthropic', def: 'deepseek-flash', models: [
@@ -2024,8 +2109,10 @@
       { id: 'ByteDance-Seed/Seed-OSS-36B-Instruct', d: '字节 Seed 开源 36B' },
       { id: 'inclusionAI/Ling-flash-2.0', d: '蚂蚁 Ling 轻量 MoE' }
     ] },
-    { id: 'openai', name: 'OpenAI', base: 'https://api.openai.com/v1', format: 'openai', bridge: true, def: 'gpt-6-luna', models: [
-      { id: 'gpt-6-astra', d: '旗舰 · 1M 上下文' },
+    { id: 'openai', name: 'OpenAI', base: 'https://api.openai.com/v1', format: 'openai', bridge: true, def: 'gpt-6.2-sol', models: [
+      { id: 'gpt-6.2-astra', d: '6.2 旗舰 · 1.05M · 强推理/编程' },
+      { id: 'gpt-6.2-sol', d: '6.2 均衡 · 1.05M · 高性价比（推荐）' },
+      { id: 'gpt-6-astra', d: '6 代旗舰 · 1M 上下文' },
       { id: 'gpt-6.1-sol', d: '智能/成本均衡档' },
       { id: 'gpt-6.1-terra', d: '6.1 代中档 · 视觉推理/写作' },
       { id: 'gpt-6-luna', d: '高吞吐低成本档（推荐）' },
@@ -2059,7 +2146,8 @@
       { id: 'gpt-oss-20b', d: '开源 20B' }
     ] },
     { id: 'anthropic', name: 'Anthropic Claude', base: 'https://api.anthropic.com', format: 'anthropic', def: 'claude-sonnet-5-5', models: [
-      { id: 'claude-fable-5-1', d: '最强公开档 · 1M · 长程 agent' },
+      { id: 'claude-fable-5-2', d: 'Fable 5.2 · 当前最强公开档 · 1M · 长程 agent' },
+      { id: 'claude-fable-5-1', d: '上代 Fable · 1M' },
       { id: 'claude-opus-5-5', d: 'Opus 旗舰 · 1M · 常开思考' },
       { id: 'claude-sonnet-5-5', d: '均衡档 · 1M（推荐）' },
       { id: 'claude-haiku-5-5', d: '高速低成本 · 1M' },
@@ -2109,9 +2197,63 @@
     return 'custom';
   }
   function fillModelSuggestions(p) {
-    $('#modelSuggestions').innerHTML = p.models.map(function (m) { return '<option value="' + esc(m.id) + '"></option>'; }).join('');
+    $('#modelSuggestions').innerHTML = effectiveModels(p).map(function (m) { return '<option value="' + esc(m.id) + '"></option>'; }).join('');
   }
-  function modelIds(p) { return p.models.map(function (m) { return m.id; }); }
+  function modelIds(p) { return effectiveModels(p).map(function (m) { return m.id; }); }
+  // ---------- 服务商实时模型目录（GET /models，按厂商缓存到本机） ----------
+  var CATALOG_KEY = 'averis.api.catalog.v1';
+  var liveCatalogs = {};
+  try { liveCatalogs = JSON.parse(localStorage.getItem(CATALOG_KEY) || '{}') || {}; } catch (e) { liveCatalogs = {}; }
+  function liveCatalogFor(p) { var e = liveCatalogs[p.id]; return e && e.models && e.models.length ? e : null; }
+  function effectiveModels(p) {
+    var live = liveCatalogFor(p);
+    if (!live) return p.models;
+    var byId = {};
+    p.models.forEach(function (m) { byId[m.id] = m; });
+    return live.models.map(function (m) {
+      var st = byId[m.id];
+      return { id: m.id, d: st && st.d ? st.d : ('实时目录' + (m.owned ? ' · ' + m.owned : '')) };
+    });
+  }
+  function updateCatalogBadge() {
+    var el = $('#catalogBadge'); if (!el) return;
+    var p = providerById($('#setApiProvider').value);
+    var live = liveCatalogFor(p);
+    el.textContent = live ? ('实时目录 · ' + String(live.at || '').slice(0, 10) + ' · ' + live.models.length + ' 个') : ('目录快照 ' + CATALOG_DATE);
+    el.classList.toggle('live', !!live);
+  }
+  function renderProviderGrid() {
+    var grid = $('#providerGrid'); if (!grid) return;
+    var list = PROVIDERS.filter(function (p) { return p.id !== 'custom'; }).concat(PROVIDERS.filter(function (p) { return p.id === 'custom'; }));
+    grid.innerHTML = list.map(function (p) {
+      return '<button type="button" class="provider-btn" data-provider="' + esc(p.id) + '" aria-pressed="false"><span>' + esc(p.name) + '</span></button>';
+    }).join('');
+    syncProviderGrid();
+  }
+  function syncProviderGrid() {
+    var grid = $('#providerGrid'); if (!grid) return;
+    var cur = $('#setApiProvider').value;
+    Array.prototype.forEach.call(grid.querySelectorAll('.provider-btn'), function (b) {
+      var on = b.getAttribute('data-provider') === cur;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+  function renderApiStatus() {
+    var ready = apiConfigured();
+    var c = window.AVERIS_API_CONFIG || {};
+    var p = providerById(c.apiProvider || $('#setApiProvider').value || 'custom');
+    var badge = $('#apiStateBadge');
+    if (badge) { badge.textContent = ready ? '已连接' : '未配置'; badge.className = 'api-state ' + (ready ? 'ok' : 'warn'); }
+    var dot = $('#apiStatusDot'); if (dot) dot.className = 'api-status-dot' + (ready ? ' ok' : '');
+    var t = $('#apiStatusTitle'); if (t) t.textContent = ready ? '可以开始真实求解' : '尚未配置模型';
+    var d = $('#apiStatusDesc'); if (d) d.textContent = ready ? ('已连接 ' + p.name + '；修改端点或模型后会自动保存。') : '填入 API Key 并测试连接后，回到工作台即可开始真实求解。';
+    var meta = $('#apiStatusMeta'); if (meta) meta.textContent = ready ? ((c.apiModel || '') + (c.apiBase ? (' · ' + c.apiBase) : '')) : '未选择服务商';
+    var ed = $('#apiEntryDot'); if (ed) ed.className = 'api-entry-dot' + (ready ? ' ok' : '');
+    var et = $('#apiEntryTitle'); if (et) et.textContent = ready ? (c.apiModel || '已配置模型') : '尚未配置模型';
+    var es = $('#apiEntryDesc'); if (es) es.textContent = ready ? (p.name + ' · 点击管理可切换模型') : '配置服务商与 API Key 后即可开始真实求解';
+    syncProviderGrid();
+  }
   // 「默认模型」下拉与抽屉模型下拉共用 #setModel 选项：随厂商目录刷新，保留当前值
   function syncModelSelect(p, current) {
     var sel = $('#setModel'); var ids = modelIds(p);
@@ -2123,17 +2265,19 @@
   function renderModelPicker() {
     var p = providerById($('#setApiProvider').value);
     var q = ($('#modelPickerFilter').value || '').trim().toLowerCase();
-    $('#modelPickerTitle').textContent = p.name + ' · ' + p.models.length + ' 个模型';
+    var models = effectiveModels(p);
+    $('#modelPickerTitle').textContent = p.name + ' · ' + models.length + ' 个模型';
     var list = $('#modelPickerList');
-    if (!p.models.length) {
+    if (!models.length) {
       list.innerHTML = '<div class="model-picker-empty">自定义端点：模型 ID 由你的网关决定，请直接在上方输入框填写。</div>';
     } else {
-      var rows = p.models.filter(function (m) { return !q || m.id.toLowerCase().indexOf(q) >= 0 || (m.d || '').toLowerCase().indexOf(q) >= 0; });
+      var rows = models.filter(function (m) { return !q || m.id.toLowerCase().indexOf(q) >= 0 || (m.d || '').toLowerCase().indexOf(q) >= 0; });
       list.innerHTML = rows.length
         ? rows.map(function (m) { return '<button type="button" class="model-picker-row" data-id="' + esc(m.id) + '"><span class="mp-id">' + esc(m.id) + '</span><span class="mp-d">' + esc(m.d || '') + '</span></button>'; }).join('')
         : '<div class="model-picker-empty">没有匹配「' + esc(q) + '」的模型，可清空筛选或直接输入模型 ID。</div>';
     }
-    $('#modelPickerFoot').textContent = '目录快照 ' + CATALOG_DATE + ' · 以厂商控制台为准 · 也可在上方输入框手动填写任意模型 ID';
+    var live = liveCatalogFor(p);
+    $('#modelPickerFoot').textContent = live ? ('实时目录 · ' + String(live.at || '').slice(0, 16).replace('T', ' ') + ' 获取 · 以厂商控制台为准') : ('目录快照 ' + CATALOG_DATE + ' · 以厂商控制台为准 · 也可在上方输入框手动填写任意模型 ID');
   }
   function openModelPicker() {
     $('#modelPickerFilter').value = '';
@@ -2187,6 +2331,9 @@
     $('#setApiProvider').value = pid;
     fillModelSuggestions(providerById(pid));
     syncModelSelect(providerById(pid), savedModel);
+    renderProviderGrid();
+    renderApiStatus();
+    updateCatalogBadge();
     window.AVERIS_API_CONFIG = cfg;
     renderApiChip();
     if (migratedFrom) {
@@ -2207,6 +2354,8 @@
     catch (e) { toast('API 配置保存失败：本机存储不可用或已满（' + e.message + '）', { icon: 'info' }); }
     window.AVERIS_API_CONFIG = out;
     renderApiChip();
+    renderApiStatus();
+    updateCatalogBadge();
     // 求解配置抽屉的模型与 API 模型保持同一概念：API 侧改模型时同步抽屉（启动时亦对齐）
     if (typeof cfg !== 'undefined' && cfg && cfg.model !== out.apiModel) { cfg.model = out.apiModel; saveCfg(); fillCfgControls(); }
     if (typeof cfg !== 'undefined' && cfg) renderCfgStrip();
@@ -2231,6 +2380,49 @@
   ['#setApiBase', '#setApiKey', '#setApiModel', '#setApiFormat', '#setTemplate'].forEach(function (sel) {
     $(sel).addEventListener('change', function () { syncApiConfig(); toast('API 配置已保存', { icon: 'check' }); });
   });
+  var providerGridEl = $('#providerGrid');
+  if (providerGridEl) providerGridEl.addEventListener('click', function (e) {
+    var b = e.target && e.target.closest ? e.target.closest('.provider-btn') : null;
+    if (!b) return;
+    var sel = $('#setApiProvider');
+    sel.value = b.getAttribute('data-provider');
+    sel.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  var revealBtn = $('#btnRevealKey');
+  if (revealBtn) revealBtn.addEventListener('click', function () {
+    var input = $('#setApiKey');
+    var show = input.type === 'password';
+    input.type = show ? 'text' : 'password';
+    revealBtn.textContent = show ? '隐藏' : '显示';
+    revealBtn.setAttribute('aria-label', show ? '隐藏密钥' : '显示密钥');
+  });
+  var refreshBtn = $('#btnRefreshModels');
+  if (refreshBtn) refreshBtn.addEventListener('click', function () {
+    var out = $('#modelRefreshResult');
+    var c = probeCfg();
+    if (!c.base || !c.key) { out.className = 'model-refresh-result err'; out.textContent = '先填写 Base URL 与 API Key，再拉取目录'; return; }
+    if (!live || typeof window.electronAPI.averisApiProbe !== 'function') { out.className = 'model-refresh-result err'; out.textContent = '浏览器演示环境不支持拉取，请在桌面端使用'; return; }
+    refreshBtn.disabled = true;
+    out.className = 'model-refresh-result'; out.textContent = '正在向服务商拉取…';
+    Promise.resolve(window.electronAPI.averisApiProbe({ mode: 'models', base: c.base, key: c.key, format: c.format, model: c.model || 'x' }))
+      .then(function (r) {
+        if (!r || !r.success) throw new Error((r && r.error) || '拉取失败');
+        var p = providerById($('#setApiProvider').value);
+        liveCatalogs[p.id] = { at: new Date().toISOString(), models: (r.models || []).map(function (m) { return { id: m.id, owned: m.owned || '' }; }) };
+        try { localStorage.setItem(CATALOG_KEY, JSON.stringify(liveCatalogs)); } catch (e) {}
+        var cur = $('#setApiModel').value.trim();
+        fillModelSuggestions(p); syncModelSelect(p, cur);
+        if (!$('#modelPicker').hidden) renderModelPicker();
+        updateCatalogBadge();
+        out.className = 'model-refresh-result ok'; out.textContent = '已获取 ' + (r.count || (r.models || []).length) + ' 个模型，已保存';
+        toast('已从服务商同步模型目录', { icon: 'check' });
+      })
+      .catch(function (e) { out.className = 'model-refresh-result err'; out.textContent = '拉取失败：' + ((e && e.message) || e); })
+      .then(function () { refreshBtn.disabled = false; });
+  });
+  var openModelPageBtn = $('#btnOpenModelPage');
+  if (openModelPageBtn) openModelPageBtn.addEventListener('click', function () { switchView('models'); });
+
   loadApiConfig();
 
   // ---------- 端点探测：测延迟 / 测缓存命中（主进程发请求，避开浏览器 CORS） ----------
@@ -2379,7 +2571,7 @@
     chip.setAttribute('tabindex', '0');
   }
   function openApiSettings() {
-    switchView('me');
+    switchView('models');
     var key = $('#setApiKey');
     if (key) {
       try { key.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) {}

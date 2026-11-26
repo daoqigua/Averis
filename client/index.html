@@ -5,7 +5,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Averis · AI Modeling & Research Studio</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23123A75'/%3E%3Cpath d='M16 6 L26 26 H21.5 L16 14 L10.5 26 H6 Z' fill='%23fff'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230071E3'/%3E%3Cpath d='M16 6 L26 26 H21.5 L16 14 L10.5 26 H6 Z' fill='%23fff'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -15,12 +15,8 @@
   <header class="titlebar">
     <div class="brand">
       <span class="brand-mark" aria-hidden="true">
-        <svg viewBox="0 0 32 32" width="26" height="26">
-          <path d="M16 3 L29 28 H23 L16 13 L9 28 H3 Z" fill="url(#gA)"/>
-          <ellipse cx="16" cy="24" rx="15" ry="5" fill="none" stroke="#3B82F6" stroke-width="2" transform="rotate(-18 16 24)"/>
-          <defs><linearGradient id="gA" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0" stop-color="#1E3A8A"/><stop offset="1" stop-color="#0F2C6B"/>
-          </linearGradient></defs>
+        <svg viewBox="0 0 32 32" width="24" height="24">
+          <path d="M16 3 L29 28 H23 L16 13 L9 28 H3 Z" fill="currentColor"/>
         </svg>
       </span>
       <span class="brand-name">Averis</span>
@@ -48,6 +44,10 @@
       <button class="rail-item" data-view="editor" title="编辑器">
         <svg viewBox="0 0 24 24" width="21" height="21"><path d="M4 5h16v14H4z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M9 5v14" stroke="currentColor" stroke-width="1.7"/><path d="M13 9h4M13 13h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
         <span>编辑器</span>
+      </button>
+      <button class="rail-item" data-view="models" title="模型与 API">
+        <svg viewBox="0 0 24 24" width="21" height="21"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M18.5 16l.8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8z" fill="currentColor"/></svg>
+        <span>模型</span>
       </button>
       <button class="rail-item" data-view="me" title="我的">
         <svg viewBox="0 0 24 24" width="21" height="21"><circle cx="12" cy="8" r="3.2" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M5 20c0-3.6 3.1-6 7-6s7 2.4 7 6" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
@@ -142,14 +142,12 @@
             <!-- 欢迎空态 -->
             <div class="welcome-state" id="welcomeState">
               <div class="welcome-mark">
-                <svg viewBox="0 0 32 32" width="44" height="44">
-                  <path d="M16 3 L29 28 H23 L16 13 L9 28 H3 Z" fill="url(#gA2)"/>
-                  <ellipse cx="16" cy="24" rx="15" ry="5" fill="none" stroke="#3B82F6" stroke-width="2" transform="rotate(-18 16 24)"/>
-                  <defs><linearGradient id="gA2" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1E3A8A"/><stop offset="1" stop-color="#0F2C6B"/></linearGradient></defs>
+                <svg viewBox="0 0 32 32" width="34" height="34">
+                  <path d="M16 3 L29 28 H23 L16 13 L9 28 H3 Z" fill="currentColor"/>
                 </svg>
               </div>
               <h1>把赛题交给 <em>Averis</em></h1>
-              <p>点「题目」上传赛题（必填），点「附件资料」上传数据（可选）。<br>也可直接粘贴题目文字；求解、改论文、补图表都在这一段对话里完成。</p>
+              <p>点「题目」上传赛题（必填），点「附件资料」上传数据（可选）。<br>也可直接粘贴题目文字；求解、改论文、补图表都在这一段对话里完成。<br><span class="welcome-tip">修改时直接说改哪里即可，Averis 会自动识别「只改论文 / 重做某一问」，无需先点卡片。</span></p>
               <div class="quick-starts">
                 <button class="quick-card" data-action="attach-problem">
                   <span class="qc-ico"><svg viewBox="0 0 24 24" width="19" height="19" aria-hidden="true"><path d="M6 3h8l4 4v14H6z" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M14 3v5h4M9 13h6M9 17h4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg></span>
@@ -180,6 +178,10 @@
             <div class="stage-bar" id="stageBar" hidden>
               <div class="stage-track" id="stageTrack"></div>
             </div>
+            <div class="intent-row" id="intentRow" hidden>
+              <span class="intent-pill" id="intentPill"></span>
+              <button class="text-btn" id="intentChange" type="button">更改</button>
+            </div>
             <div class="composer" id="composer">
               <div class="attach-row" id="attachRowProblem" hidden></div>
               <div class="attach-row" id="attachRowData" hidden></div>
@@ -202,7 +204,7 @@
                 </div>
                 <div class="toolbar-right">
                   <button class="send-btn" id="btnSend" title="发送（Enter）" aria-label="发送" disabled>
-                    <svg viewBox="0 0 24 24" width="18" height="18"><path d="M4 12l16-8-6 8 6 8z" fill="currentColor"/></svg>
+                    <svg viewBox="0 0 24 24" width="16" height="16"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
                   </button>
                   <button class="stop-btn" id="btnStop" title="停止" hidden>
                     <svg viewBox="0 0 24 24" width="16" height="16"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"/></svg>
@@ -210,7 +212,7 @@
                 </div>
               </div>
             </div>
-            <div class="composer-hint">① 点「题目」添加赛题（必填）→ ② 点「附件资料」添加数据（可选）→ ③ 发送。文件会自动放进 题目/ 与 数据/。</div>
+            <div class="composer-hint">新任务：① 题目 → ② 附件资料 → ③ 发送；修改旧项目：直接输入要改哪里，会自动识别范围。文件自动放进 题目/ 与 数据/。</div>
           </div>
         </section>
 
@@ -342,7 +344,76 @@
         </div>
       </section>
 
-      <!-- ---------- 视图3：我的（首页 + 资料 + 用量 合并） ---------- -->
+      <!-- ---------- 视图3：模型与 API ---------- -->
+      <section class="view" id="view-models">
+        <div class="models-scroll">
+          <header class="models-head">
+            <div>
+              <h1>模型与 API</h1>
+              <p>选择服务商、粘贴密钥并挑选模型。配置仅保存在本机，题目与数据不会上传。</p>
+            </div>
+            <span class="api-state" id="apiStateBadge">未配置</span>
+          </header>
+
+          <section class="mcard status-card">
+            <div class="api-status-main">
+              <span class="api-status-dot" id="apiStatusDot"></span>
+              <div class="api-status-text">
+                <h2 id="apiStatusTitle">尚未配置模型</h2>
+                <p id="apiStatusDesc">填入 API Key 并测试连接后，回到工作台即可开始真实求解。</p>
+              </div>
+            </div>
+            <div class="api-status-meta" id="apiStatusMeta">未选择服务商</div>
+          </section>
+
+          <section class="mcard">
+            <div class="mcard-head"><h2>1. 选择服务商</h2><span class="mhint">选中后自动填入端点与推荐模型</span></div>
+            <div class="provider-grid" id="providerGrid" role="group" aria-label="服务商预设"></div>
+            <select id="setApiProvider" hidden aria-label="服务商预设"></select>
+          </section>
+
+          <section class="mcard">
+            <div class="mcard-head"><h2>2. 连接密钥</h2><span class="mhint">仅保存在本机浏览器存储</span></div>
+            <div class="mgrid">
+              <label class="mrow wide"><span>API Base URL</span><input type="text" id="setApiBase" placeholder="https://api.example.com/v1（示例地址）"></label>
+              <label class="mrow wide"><span>API Key</span>
+                <span class="key-wrap">
+                  <input type="password" id="setApiKey" placeholder="粘贴你的密钥">
+                  <button type="button" class="key-toggle" id="btnRevealKey" aria-label="显示密钥">显示</button>
+                </span>
+              </label>
+              <label class="mrow"><span>接口格式</span><select id="setApiFormat"><option>auto</option><option>openai</option><option>anthropic</option></select></label>
+              <label class="mrow" hidden><span>默认模型</span><select id="setModel"><option>deepseek-flash</option></select></label>
+            </div>
+            <div class="api-actions">
+              <button class="primary-btn sm" id="btnProbeLatency" type="button" title="发一个最小请求，测量端点响应延迟">测试连接</button>
+              <button class="ghost-btn" id="btnProbeCache" type="button" title="连发两次相同长提示，读第二次响应里的缓存命中 token">测缓存命中</button>
+              <span class="api-probe-result" id="apiProbeResult" role="status"></span>
+            </div>
+          </section>
+
+          <section class="mcard">
+            <div class="mcard-head"><h2>3. 选择模型</h2><span class="catalog-badge" id="catalogBadge">目录快照 2026-11-18</span></div>
+            <div class="model-picker-anchor">
+              <label class="mrow"><span>模型 ID</span><span class="model-input-wrap"><input type="text" id="setApiModel" value="deepseek-flash" list="modelSuggestions" autocomplete="off"><button type="button" class="ghost-btn model-pick-btn" id="btnModelPick" aria-haspopup="true" aria-expanded="false" title="罗列当前厂商全部在售模型">全部模型</button></span></label>
+              <div class="model-picker" id="modelPicker" hidden role="dialog" aria-label="厂商模型清单">
+                <div class="model-picker-head"><strong id="modelPickerTitle">模型清单</strong><input type="text" id="modelPickerFilter" placeholder="筛选模型…" aria-label="筛选模型"><button type="button" class="model-picker-close" id="modelPickerClose" aria-label="关闭模型清单">×</button></div>
+                <div class="model-picker-list" id="modelPickerList"></div>
+                <div class="model-picker-foot" id="modelPickerFoot"></div>
+              </div>
+            </div>
+            <div class="model-actions">
+              <button class="ghost-btn" id="btnRefreshModels" type="button">从服务商拉取最新目录</button>
+              <span class="model-refresh-result" id="modelRefreshResult" role="status"></span>
+            </div>
+            <datalist id="modelSuggestions"></datalist>
+          </section>
+
+          <p class="models-note">提示：部分厂商（OpenAI、Gemini、硅基流动等）没有原生 Anthropic 端点，工具调用经 OpenAI 兼容层转换，长任务稳定性不如 Kimi / GLM / DeepSeek / Claude。模型目录以厂商控制台为准，可随时拉取最新列表。</p>
+        </div>
+      </section>
+
+      <!-- ---------- 视图4：我的（首页 + 资料 + 用量 合并） ---------- -->
       <section class="view" id="view-me">
         <div class="me-scroll">
           <div class="me-hero">
@@ -375,32 +446,20 @@
             <div class="me-card-head"><h3>偏好设置</h3></div>
             <div class="settings-grid">
               <label class="setting-row"><span>显示名称</span><input type="text" id="setName" value="" placeholder="未设置"></label>
-              <label class="setting-row"><span>默认模型</span><select id="setModel"><option>deepseek-flash</option></select></label>
               <label class="setting-row"><span>论文模板</span><select id="setTemplate"><option>自动识别</option><option>高教社杯</option><option>数维杯秋季赛</option></select></label>
               <label class="setting-row"><span>主题</span><select id="setTheme"><option>浅色</option><option>深色</option></select></label>
             </div>
-            <div class="settings-divider"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 3l7 4v5c0 4.4-3 8-7 9-4-1-7-4.6-7-9V7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.5 12l2 2 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>API 配置（真实求解需要）</div>
-            <div class="settings-grid">
-              <label class="setting-row wide"><span>服务商预设</span><select id="setApiProvider" aria-label="服务商预设"></select></label>
-              <label class="setting-row wide"><span>API Base URL</span><input type="text" id="setApiBase" placeholder="https://api.example.com/v1（示例地址）"></label>
-              <label class="setting-row wide"><span>API Key</span><input type="password" id="setApiKey" placeholder="填入你的密钥"></label>
-              <div class="model-picker-anchor">
-                <label class="setting-row"><span>模型</span><span class="model-input-wrap"><input type="text" id="setApiModel" value="deepseek-flash" list="modelSuggestions" autocomplete="off"><button type="button" class="ghost-btn model-pick-btn" id="btnModelPick" aria-haspopup="true" aria-expanded="false" title="罗列当前厂商全部在售模型">全部模型</button></span></label>
-                <div class="model-picker" id="modelPicker" hidden role="dialog" aria-label="厂商模型清单">
-                  <div class="model-picker-head"><strong id="modelPickerTitle">模型清单</strong><input type="text" id="modelPickerFilter" placeholder="筛选模型…" aria-label="筛选模型"><button type="button" class="model-picker-close" id="modelPickerClose" aria-label="关闭模型清单">×</button></div>
-                  <div class="model-picker-list" id="modelPickerList"></div>
-                  <div class="model-picker-foot" id="modelPickerFoot"></div>
+            <div class="settings-divider"><svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><path d="M12 3l7 4v5c0 4.4-3 8-7 9-4-1-7-4.6-7-9V7z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/><path d="M9.5 12l2 2 3.5-3.5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>模型与 API</div>
+            <div class="api-entry" id="apiEntry">
+              <div class="api-entry-main">
+                <span class="api-entry-dot" id="apiEntryDot"></span>
+                <div class="api-entry-text">
+                  <strong id="apiEntryTitle">尚未配置模型</strong>
+                  <span id="apiEntryDesc">配置服务商与 API Key 后即可开始真实求解</span>
                 </div>
               </div>
-              <label class="setting-row"><span>接口格式</span><select id="setApiFormat"><option>auto</option><option>openai</option><option>anthropic</option></select></label>
-              <datalist id="modelSuggestions"></datalist>
-              <div class="api-probe-row">
-                <button class="ghost-btn" id="btnProbeLatency" title="发一个最小请求，测量端点响应延迟">测延迟</button>
-                <button class="ghost-btn" id="btnProbeCache" title="连发两次相同长提示，读第二次响应里的缓存命中 token">测缓存命中</button>
-                <span class="api-probe-result" id="apiProbeResult" role="status"></span>
-              </div>
+              <button class="ghost-btn" id="btnOpenModelPage" type="button">管理</button>
             </div>
-            <div class="settings-note"><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" stroke-width="1.7"/><path d="M12 11v5M12 8h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg><span>模型 Key 由你自行配置；Averis 离线运行，不上传题目与数据。填入后真实求解会用该端点调用模型。API Key 以明文保存在本机浏览器存储中，仅本机使用。</span></div>
           </section>
         </div>
       </section>
